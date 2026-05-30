@@ -582,6 +582,7 @@ struct AppPicker: View {
 /// Holds the AppKit text field behind the identity tile and force-focuses it
 /// before opening the system emoji viewer, so the picked glyph is inserted here
 /// rather than into whatever SwiftUI field happens to hold first responder.
+@MainActor
 final class EmojiCatcher: ObservableObject {
     fileprivate weak var field: NSTextField?
 
