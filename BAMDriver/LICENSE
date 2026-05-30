@@ -1,0 +1,29 @@
+BAMDriver — CoreAudio virtual audio driver for bam
+
+This driver (BAMDriver.c and the built BAMDriver.driver bundle) is a derivative
+work of BlackHole:
+
+    BlackHole — https://github.com/ExistentialAudio/BlackHole
+    Copyright (C) 2019 Existential Audio Inc.
+
+BlackHole is licensed under the GNU General Public License, version 3
+(GPL-3.0). As a derivative work, BAMDriver is therefore also licensed under
+GPL-3.0.
+
+    Modifications copyright (C) 2026 lkshrk
+
+The complete GPL-3.0 license text is preserved alongside this file as
+LICENSE.BlackHole.
+
+You may redistribute and/or modify this driver under the terms of the GPL-3.0
+as published by the Free Software Foundation. It is distributed in the hope
+that it will be useful, but WITHOUT ANY WARRANTY; without even the implied
+warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+license for details.
+
+--------------------------------------------------------------------------------
+
+Scope note: the bam application and BamKit (in the parent directory) are a
+separate program licensed under the MIT License (see ../LICENSE). They
+communicate with this driver only through the macOS CoreAudio HAL and do not
+link against or embed its GPL-licensed code.
