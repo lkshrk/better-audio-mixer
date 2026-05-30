@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { font: 13px/1.4 -apple-system, sans-serif; margin: 12px; color: #ddd; background: #2d2d2d; }
+    .row { display: flex; align-items: center; margin-bottom: 10px; }
+    label { width: 80px; color: #999; }
+    select, input { flex: 1; background: #3d3d3d; color: #ddd; border: 1px solid #555; border-radius: 4px; padding: 4px; }
+    input[type=range] { padding: 0; }
+    .stepVal { flex: 0 0 38px; text-align: right; color: #ddd; }
+    .hint { color: #777; font-size: 11px; margin: -4px 0 10px 80px; }
+  </style>
+</head>
+<body>
+  <div class="row" id="modeRow">
+    <label>Action</label>
+    <select id="mode">
+      <option value="mute">Mute</option>
+      <option value="adjust">Adjust</option>
+      <option value="set">Set</option>
+    </select>
+  </div>
+  <div class="hint" id="dialHint">On a dial: rotate adjusts, press mutes.</div>
+  <div class="row" id="stepRow">
+    <label>Amount</label>
+    <input id="step" type="range" min="-25" max="25" value="5" />
+    <span class="stepVal" id="stepVal">+5%</span>
+  </div>
+  <div class="row" id="posRow" style="display:none">
+    <label>Set %</label>
+    <input id="pos" type="number" min="0" max="100" value="50" />
+  </div>
+  <div class="row" id="styleRow">
+    <label>Dial LCD</label>
+    <select id="style">
+      <option value="combined">Combined</option>
+      <option value="slider">Volume Slider</option>
+      <option value="meter">Level Meter</option>
+    </select>
+  </div>
+  <div class="row" id="keyStyleRow">
+    <label>Key style</label>
+    <select id="keyStyle">
+      <option value="meter">Level Meter</option>
+      <option value="bars">Level Bars</option>
+      <option value="radial">Radial Gauge</option>
+    </select>
+  </div>
+
+  <script src="common.js"></script>
+  <script>
+    const modeEl = document.getElementById("mode");
+    const stepEl = document.getElementById("step");
+    const stepVal = document.getElementById("stepVal");
+    const posEl = document.getElementById("pos");
+    const styleEl = document.getElementById("style");
+    const stepRow = document.getElementById("stepRow");
+    const fmtStep = (v) => (v > 0 ? "+" : "") + v + "%";
+    const posRow = document.getElementById("posRow");
+    const styleRow = document.getElementById("styleRow");
+    const keyStyleEl = document.getElementById("keyStyle");
+    const keyStyleRow = document.getElementById("keyStyleRow");
+    const modeRow = document.getElementById("modeRow");
+    const dialHint = document.getElementById("dialHint");
+
+    function applyMode() {
+      const isDial = controller === "Encoder";
+      const m = modeEl.value;
+      modeRow.style.display = isDial ? "none" : "flex";
+      dialHint.style.display = isDial ? "none" : "block";
+      // Dial: step = rotate sensitivity (positive). Key: signed adjust amount.
+      stepEl.min = isDial ? 1 : -25;
+      if (isDial && +stepEl.value < 1) { stepEl.value = 5; stepVal.textContent = fmtStep(5); }
+      stepRow.style.display = (isDial || m === "adjust") ? "flex" : "none";
+      posRow.style.display = (!isDial && m === "set") ? "flex" : "none";
+      styleRow.style.display = isDial ? "flex" : "none";
+      keyStyleRow.style.display = isDial ? "none" : "flex";
+    }
+
+    function piReady(s) {
+      modeEl.value = s.mode || "mute";
+      stepEl.value = Math.round((s.step ?? 0.05) * 100);
+      stepVal.textContent = fmtStep(+stepEl.value);
+      posEl.value = Math.round((s.pos ?? 0.5) * 100);
+      styleEl.value = s.style || "combined";
+      keyStyleEl.value = s.keyStyle || "meter";
+      applyMode();
+    }
+
+    modeEl.onchange = () => { setSetting("mode", modeEl.value); applyMode(); };
+    stepEl.oninput = () => stepVal.textContent = fmtStep(+stepEl.value);
+    stepEl.onchange = () => setSetting("step", +stepEl.value / 100);
+    posEl.onchange = () => setSetting("pos", Math.min(100, Math.max(0, +posEl.value)) / 100);
+    styleEl.onchange = () => setSetting("style", styleEl.value);
+    keyStyleEl.onchange = () => setSetting("keyStyle", keyStyleEl.value);
+  </script>
+</body>
+</html>

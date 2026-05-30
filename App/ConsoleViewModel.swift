@@ -1,4 +1,5 @@
 import AudioEngine
+import BamControlKit
 import BamCore
 import Foundation
 import Observation
@@ -53,6 +54,8 @@ final class ConsoleViewModel {
     private var recoveryTask: Task<Void, Never>?
     private var routerEventTask: Task<Void, Never>?
     private var defaultOutputUID: String?
+    private var controlServer: ControlServer?
+    private var controlPushTask: Task<Void, Never>?
 
     /// The catch-all device. Its source is the `.rest` remainder; it routes every
     /// app not claimed by another device to the system default hardware output.
@@ -111,7 +114,25 @@ final class ConsoleViewModel {
         if activeMixID == nil { activeMixID = config.mixes.first?.id }
         await captureStockVolume()
         await subscribe()
+        startControlServer()
         await restoreOutputVolume()
+    }
+
+    /// Stand up the Stream Deck control socket and feed it the current snapshot at
+    /// ~12fps. The server reads the latest pushed snapshot on its own timer, so a
+    /// steady push keeps remote clients live without coupling to the router stream.
+    private func startControlServer() {
+        let server = ControlServer()
+        server.mixer = self
+        server.start()
+        controlServer = server
+        controlPushTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { break }
+                self.controlServer?.pushSnapshot(self.controlSnapshot)
+                try? await Task.sleep(for: .milliseconds(83))
+            }
+        }
     }
 
     /// Remember the device's *stock* volume — its level right now, before bam has
@@ -231,6 +252,8 @@ final class ConsoleViewModel {
     }
 
     func stop() async {
+        controlPushTask?.cancel(); controlPushTask = nil
+        controlServer?.stop(); controlServer = nil
         recoveryTask?.cancel(); recoveryTask = nil
         routerEventTask?.cancel(); routerEventTask = nil
         meterTask?.cancel(); meterTask = nil

@@ -12,6 +12,7 @@
 		3FA31007D9AF5EA42B1FC40F /* AudioEngine in Frameworks */ = {isa = PBXBuildFile; productRef = C5F64AA36C7A253DD0EB7D7E /* AudioEngine */; };
 		5ACCD643C76B8FFDDD6CE8FF /* RouterRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6CF52141C9E399BB8CAADB5 /* RouterRecoveryTests.swift */; };
 		66A4F65A334F9D25F5182911 /* BamCore in Frameworks */ = {isa = PBXBuildFile; productRef = C2F69472178C3D00A024AAE5 /* BamCore */; };
+		66D1D1C058436C40FCAB7A42 /* ConsoleViewModel+MixerControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3682354B40DAFEB00830820E /* ConsoleViewModel+MixerControl.swift */; };
 		8C48A55690421E4B23FE3EC5 /* ChannelStrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56565B7281A1EBD3533F2E5B /* ChannelStrip.swift */; };
 		B8EB51CB3A3569BD4BE2C3DD /* BamApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B310ECE845F2AF06ECF89C86 /* BamApp.swift */; };
 		BA3C53357AE7956A30B0B5B7 /* ConsoleTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0B923B1721FFDB99A180DE /* ConsoleTheme.swift */; };
@@ -19,6 +20,7 @@
 		CF8E75A2E96EC62F76648564 /* BamCore in Frameworks */ = {isa = PBXBuildFile; productRef = C9B32F9A3C2B10B8C94E88E0 /* BamCore */; };
 		DA9561039E53227968D57B12 /* MeterBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29090E0D63EACFDF77E1A7CD /* MeterBar.swift */; };
 		E76E0E6166086845C988A34D /* ConsoleViewModelUseCaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10AB49B15328BE7A0FDFF21 /* ConsoleViewModelUseCaseTests.swift */; };
+		E8F967216E27372A8CEF9FD7 /* BamControlKit in Frameworks */ = {isa = PBXBuildFile; productRef = D2F0313AF12090041C480E53 /* BamControlKit */; };
 		FAD8F0918279CFCAC4A53A0B /* bam.yaml in Resources */ = {isa = PBXBuildFile; fileRef = 0425A295A3528927CF29587D /* bam.yaml */; };
 		FBA2134C96A2E13DA9155BED /* AudioEngine in Frameworks */ = {isa = PBXBuildFile; productRef = 93500ACEF0F9DE2FB41A931E /* AudioEngine */; };
 /* End PBXBuildFile section */
@@ -37,6 +39,7 @@
 		0425A295A3528927CF29587D /* bam.yaml */ = {isa = PBXFileReference; lastKnownFileType = text.yaml; path = bam.yaml; sourceTree = "<group>"; };
 		19EAE6316D97A824FA6AB00C /* bamTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = bamTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		29090E0D63EACFDF77E1A7CD /* MeterBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeterBar.swift; sourceTree = "<group>"; };
+		3682354B40DAFEB00830820E /* ConsoleViewModel+MixerControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ConsoleViewModel+MixerControl.swift"; sourceTree = "<group>"; };
 		4DD2D055563B514321429B1D /* ConsoleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConsoleView.swift; sourceTree = "<group>"; };
 		56565B7281A1EBD3533F2E5B /* ChannelStrip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChannelStrip.swift; sourceTree = "<group>"; };
 		767CA954922083AFCB350404 /* ConsoleViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConsoleViewModel.swift; sourceTree = "<group>"; };
@@ -58,6 +61,7 @@
 			files = (
 				66A4F65A334F9D25F5182911 /* BamCore in Frameworks */,
 				FBA2134C96A2E13DA9155BED /* AudioEngine in Frameworks */,
+				E8F967216E27372A8CEF9FD7 /* BamControlKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -101,6 +105,7 @@
 				8A0B923B1721FFDB99A180DE /* ConsoleTheme.swift */,
 				4DD2D055563B514321429B1D /* ConsoleView.swift */,
 				767CA954922083AFCB350404 /* ConsoleViewModel.swift */,
+				3682354B40DAFEB00830820E /* ConsoleViewModel+MixerControl.swift */,
 				C45ED77F92E7C31505AAAB9A /* Info.plist */,
 				29090E0D63EACFDF77E1A7CD /* MeterBar.swift */,
 			);
@@ -145,6 +150,7 @@
 			packageProductDependencies = (
 				C2F69472178C3D00A024AAE5 /* BamCore */,
 				93500ACEF0F9DE2FB41A931E /* AudioEngine */,
+				D2F0313AF12090041C480E53 /* BamControlKit */,
 			);
 			productName = bam;
 			productReference = C593CC14330A42AF1C26302F /* bam.app */;
@@ -229,6 +235,7 @@
 				8C48A55690421E4B23FE3EC5 /* ChannelStrip.swift in Sources */,
 				BA3C53357AE7956A30B0B5B7 /* ConsoleTheme.swift in Sources */,
 				292CE93EE2B46905FA328AE3 /* ConsoleView.swift in Sources */,
+				66D1D1C058436C40FCAB7A42 /* ConsoleViewModel+MixerControl.swift in Sources */,
 				22854C12B20885A8D5631E36 /* ConsoleViewModel.swift in Sources */,
 				DA9561039E53227968D57B12 /* MeterBar.swift in Sources */,
 			);
@@ -513,6 +520,10 @@
 		C9B32F9A3C2B10B8C94E88E0 /* BamCore */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = BamCore;
+		};
+		D2F0313AF12090041C480E53 /* BamControlKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = BamControlKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

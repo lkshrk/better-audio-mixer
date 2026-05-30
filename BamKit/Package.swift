@@ -9,6 +9,7 @@ let package = Package(
     products: [
         .library(name: "BamCore", targets: ["BamCore"]),
         .library(name: "AudioEngine", targets: ["AudioEngine"]),
+        .library(name: "BamControlKit", targets: ["BamControlKit"]),
     ],
     dependencies: [
         .package(url: "https://github.com/jpsim/Yams.git", from: "5.1.0"),
@@ -26,6 +27,14 @@ let package = Package(
                 .product(name: "Atomics", package: "swift-atomics"),
             ]
         ),
+        .target(
+            name: "BamControlKit",
+            dependencies: ["BamCore"]
+        ),
+        .executableTarget(
+            name: "BAMStreamDeck",
+            dependencies: ["BamControlKit"]
+        ),
         .testTarget(
             name: "BamCoreTests",
             dependencies: ["BamCore"]
@@ -33,6 +42,14 @@ let package = Package(
         .testTarget(
             name: "AudioEngineTests",
             dependencies: ["AudioEngine"]
+        ),
+        .testTarget(
+            name: "BamControlKitTests",
+            dependencies: ["BamControlKit"]
+        ),
+        .testTarget(
+            name: "BAMStreamDeckTests",
+            dependencies: ["BAMStreamDeck"]
         ),
     ]
 )

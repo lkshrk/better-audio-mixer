@@ -18,7 +18,7 @@ targets:
     info:
       path: App/Info.plist
       properties:
-        CFBundleDisplayName: BAM
+        CFBundleDisplayName: Better Audio Mixer
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         LSUIElement: true
@@ -49,6 +49,8 @@ targets:
         product: BamCore
       - package: BamKit
         product: AudioEngine
+      - package: BamKit
+        product: BamControlKit
   bamTests:
     type: bundle.unit-test
     platform: macOS
