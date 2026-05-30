@@ -9,16 +9,14 @@ final class RouterRecoveryTests: XCTestCase {
     private var suiteName = ""
     private var defaults: UserDefaults!
 
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         suiteName = "bam.recovery.\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suiteName)!
         defaults.set(true, forKey: ConsoleViewModel.driverKey)
     }
 
-    override func tearDown() {
+    override func tearDown() async throws {
         defaults.removePersistentDomain(forName: suiteName)
-        super.tearDown()
     }
 
     private func eventually(_ timeout: TimeInterval = 1.0, _ cond: () -> Bool) async -> Bool {

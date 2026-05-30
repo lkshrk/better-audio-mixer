@@ -9,15 +9,13 @@ final class ConsoleViewModelUseCaseTests: XCTestCase {
     private var suiteName = ""
     private var defaults: UserDefaults!
 
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         suiteName = "bam.tests.\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suiteName)!
     }
 
-    override func tearDown() {
+    override func tearDown() async throws {
         defaults.removePersistentDomain(forName: suiteName)
-        super.tearDown()
     }
 
     private func makeModel(engine: MockAudioEngine, driver: Bool, saved: Double?) -> ConsoleViewModel {
