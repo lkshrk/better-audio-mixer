@@ -15,13 +15,14 @@ permissions:
   actions: read
 
 jobs:
-  release:
-    # Only when the triggering CI run passed (or a manual dispatch).
+  # Cheap gate: runs only when the triggering CI passed (or a manual dispatch),
+  # then resolves whether a vX.Y.Z tag points at the tested commit. The heavy
+  # release job is skipped (shown grey, not green) whenever there is no tag.
+  gate:
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
-    runs-on: macos-15
-    env:
-      DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
-      SIGNING_IDENTITY: ${{ secrets.SIGNING_IDENTITY }}
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
     steps:
       - name: Verify CI passed for manual release
         if: github.event_name == 'workflow_dispatch'
@@ -53,22 +54,32 @@ jobs:
           TAG=$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           if [ -z "$TAG" ]; then
-            echo "No vX.Y.Z tag points at this commit; skipping release."
+            echo "No vX.Y.Z tag points at this commit; release job will be skipped."
           else
             echo "Release tag: $TAG"
-            git checkout "$TAG"
           fi
 
+  release:
+    needs: gate
+    if: needs.gate.outputs.tag != ''
+    runs-on: macos-15
+    env:
+      DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
+      SIGNING_IDENTITY: ${{ secrets.SIGNING_IDENTITY }}
+      TAG: ${{ needs.gate.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.tag }}
+          fetch-depth: 0
+
       - name: Select Xcode
-        if: steps.tag.outputs.tag != ''
         run: sudo xcode-select -s /Applications/Xcode_16.app
 
       - name: Install XcodeGen
-        if: steps.tag.outputs.tag != ''
         run: brew install xcodegen
 
       - name: Import signing certificate
-        if: steps.tag.outputs.tag != ''
         env:
           CERT_P12: ${{ secrets.DEVELOPER_ID_CERT_P12 }}
           CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
@@ -86,11 +97,9 @@ jobs:
           security list-keychain -d user -s "$KEYCHAIN" $(security list-keychain -d user | tr -d '"')
 
       - name: Generate project
-        if: steps.tag.outputs.tag != ''
         run: xcodegen generate
 
       - name: Build & sign (Developer ID)
-        if: steps.tag.outputs.tag != ''
         run: |
           xcodebuild -project bam.xcodeproj -scheme bam \
             -configuration Release -derivedDataPath .build \
@@ -102,13 +111,11 @@ jobs:
             build
 
       - name: Package
-        if: steps.tag.outputs.tag != ''
         run: |
           APP=".build/Build/Products/Release/bam.app"
           ditto -c -k --sequesterRsrc --keepParent "$APP" bam.zip
 
       - name: Notarize & staple
-        if: steps.tag.outputs.tag != ''
         id: pkg
         env:
           NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
@@ -141,20 +148,17 @@ jobs:
           echo "sha256=$(shasum -a 256 bam.zip | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub release
-        if: steps.tag.outputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ steps.tag.outputs.tag }}" bam.zip \
-            --title "${{ steps.tag.outputs.tag }}" \
+          gh release create "$TAG" bam.zip \
+            --title "$TAG" \
             --generate-notes \
             --notes "sha256: \`${{ steps.pkg.outputs.sha256 }}\`"
 
       - name: Bump Homebrew tap
-        if: steps.tag.outputs.tag != ''
         env:
           TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
-          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           VERSION="${TAG#v}"
           SHA="${{ steps.pkg.outputs.sha256 }}"
