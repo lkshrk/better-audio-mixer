@@ -1,0 +1,95 @@
+{
+  "UUID": "me.harke.bam",
+  "SDKVersion": 2,
+  "Author": "harke",
+  "Name": "Better Audio Mixer",
+  "Description": "Remote control for the Better Audio Mixer per-app audio mixer.",
+  "Category": "Better Audio Mixer",
+  "CategoryIcon": "icons/category",
+  "Icon": "icons/category",
+  "Version": "0.9.5.0",
+  "CodePath": "bin/BAMStreamDeck",
+  "Software": {
+    "MinimumVersion": "6.5"
+  },
+  "OS": [
+    {
+      "Platform": "mac",
+      "MinimumVersion": "12"
+    }
+  ],
+  "Actions": [
+    {
+      "UUID": "me.harke.bam.streamdeck.device",
+      "Name": "Device",
+      "Icon": "icons/device",
+      "Tooltip": "Mute, adjust, or set a device — on a key or a dial.",
+      "PropertyInspectorPath": "pi/device.html",
+      "Controllers": [
+        "Keypad",
+        "Encoder"
+      ],
+      "Encoder": {
+        "layout": "layouts/band.json",
+        "TriggerDescription": {
+          "Rotate": "Adjust volume",
+          "Push": "Mute"
+        }
+      },
+      "States": [
+        {
+          "Image": "icons/key",
+          "TitleAlignment": "bottom"
+        },
+        {
+          "Image": "icons/key",
+          "TitleAlignment": "bottom"
+        }
+      ]
+    },
+    {
+      "UUID": "me.harke.bam.streamdeck.master",
+      "Name": "Master",
+      "Icon": "icons/masterVolume",
+      "Tooltip": "Mute, adjust, or set the master — on a key or a dial.",
+      "PropertyInspectorPath": "pi/master.html",
+      "Controllers": [
+        "Keypad",
+        "Encoder"
+      ],
+      "Encoder": {
+        "layout": "layouts/band.json",
+        "TriggerDescription": {
+          "Rotate": "Adjust master",
+          "Push": "Mute"
+        }
+      },
+      "States": [
+        {
+          "Image": "icons/key",
+          "TitleAlignment": "bottom"
+        },
+        {
+          "Image": "icons/key",
+          "TitleAlignment": "bottom"
+        }
+      ]
+    },
+    {
+      "UUID": "me.harke.bam.streamdeck.output",
+      "Name": "Output Device",
+      "Icon": "icons/output",
+      "Tooltip": "Set or toggle the bam hardware output device.",
+      "PropertyInspectorPath": "pi/output.html",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "icons/key",
+          "TitleAlignment": "middle"
+        }
+      ]
+    }
+  ]
+}

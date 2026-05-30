@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { font: 13px/1.4 -apple-system, sans-serif; margin: 12px; color: #ddd; background: #2d2d2d; }
+    .row { display: flex; align-items: center; margin-bottom: 10px; }
+    label { width: 80px; color: #999; }
+    select, input { flex: 1; background: #3d3d3d; color: #ddd; border: 1px solid #555; border-radius: 4px; padding: 4px; }
+    .emoji { max-width: 56px; flex: 0 0 56px; text-align: center; }
+    .hint { color: #888; font-size: 11px; margin-top: -4px; margin-bottom: 10px; }
+  </style>
+</head>
+<body>
+  <div class="row">
+    <label>Mode</label>
+    <select id="mode">
+      <option value="set">Set device</option>
+      <option value="toggle">Toggle A &harr; B</option>
+    </select>
+  </div>
+
+  <div class="row">
+    <label id="labelA">Device</label>
+    <select id="a"></select>
+  </div>
+
+  <div class="row" id="rowB" style="display:none">
+    <label>Device B</label>
+    <select id="b"></select>
+  </div>
+
+  <div class="row">
+    <label>Show name</label>
+    <input id="showName" type="checkbox" style="flex:0 0 auto; margin-right:auto" />
+  </div>
+
+  <div class="hint">The device icon shows centered on the key; the name below is optional.</div>
+  <div class="hint">Switching output is available once bam v3 routing ships; the key flashes an alert until then.</div>
+
+  <script src="common.js"></script>
+  <script>
+    const modeEl = document.getElementById("mode");
+    const aEl = document.getElementById("a");
+    const bEl = document.getElementById("b");
+    const rowB = document.getElementById("rowB");
+    const labelA = document.getElementById("labelA");
+    const showNameEl = document.getElementById("showName");
+
+    function applyMode() {
+      const toggle = modeEl.value === "toggle";
+      rowB.style.display = toggle ? "flex" : "none";
+      labelA.textContent = toggle ? "Device A" : "Device";
+    }
+
+    onOutputs = (outputs) => {
+      fillOutputDropdown(aEl, outputs, "a");
+      fillOutputDropdown(bEl, outputs, "b", { allowNone: true });
+    };
+
+    function piReady(s) {
+      modeEl.value = s.mode || "set";
+      applyMode();
+      showNameEl.checked = !!s.showName;
+      requestOutputs();
+    }
+
+    modeEl.onchange = () => { setSetting("mode", modeEl.value); applyMode(); };
+    aEl.onchange = () => setSetting("a", aEl.value);
+    bEl.onchange = () => setSetting("b", bEl.value);
+    showNameEl.onchange = () => setSetting("showName", showNameEl.checked);
+  </script>
+</body>
+</html>

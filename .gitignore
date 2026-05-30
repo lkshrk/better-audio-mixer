@@ -1,6 +1,9 @@
 # Secrets
 ./secrets/
 
+# Stream Deck plugin: built binary is produced by build-plugin.sh, not committed
+StreamDeck/me.harke.bam.sdPlugin/bin/
+
 # Swift / Xcode build artifacts
 .build/
 .build-dev/

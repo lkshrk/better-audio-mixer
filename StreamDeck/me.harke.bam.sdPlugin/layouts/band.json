@@ -1,0 +1,11 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/layout.json",
+  "id": "band",
+  "items": [
+    { "key": "icon", "type": "pixmap", "rect": [8, 18, 58, 58] },
+    { "key": "title", "type": "text", "rect": [72, 10, 120, 15], "font": { "size": 13, "weight": 600 }, "alignment": "left" },
+    { "key": "value", "type": "text", "rect": [72, 26, 120, 24], "font": { "size": 22, "weight": 700 }, "alignment": "left" },
+    { "key": "meter", "type": "gbar", "rect": [72, 55, 120, 18], "value": 0, "subtype": 0, "bar_h": 18, "border_w": 0, "bar_bg_c": "0:#39d353,0.6:#f4b675,0.85:#ff8a3d,1:#ff4d4d" },
+    { "key": "slider", "type": "bar", "rect": [72, 78, 120, 5], "value": 0, "subtype": 0, "border_w": 0, "bar_bg_c": "#4A9EFF" }
+  ]
+}

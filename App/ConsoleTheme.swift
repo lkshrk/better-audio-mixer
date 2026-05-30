@@ -164,17 +164,7 @@ struct Meter: View {
 }
 
 // MARK: - Volume taper
-
-/// Maps a 0…100 user-facing volume to the linear gain stored in the config.
-/// A cube taper makes each step of the 0–100 range roughly equal perceived
-/// loudness, so the top of the fader isn't dead and the range feels even.
-/// `gain` is what the engine multiplies; `position` is 0…1 fader travel.
-enum AudioTaper {
-    static let exp = 3.0
-    static func position(fromGain g: Double) -> Double { pow(min(1, max(0, g)), 1 / exp) }
-    static func gain(fromPosition p: Double) -> Double { pow(min(1, max(0, p)), exp) }
-    static func percent(fromGain g: Double) -> Int { Int((position(fromGain: g) * 100).rounded()) }
-}
+// AudioTaper is defined in BamCore (public). ConsoleTheme gets it via `import BamCore`.
 
 // MARK: - Fader
 
