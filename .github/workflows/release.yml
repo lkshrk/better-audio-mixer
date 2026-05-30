@@ -168,10 +168,12 @@ jobs:
           sed -i '' -E "s/version \".*\"/version \"${VERSION}\"/" tap/Casks/bam.rb
           sed -i '' -E "s/sha256 \".*\"/sha256 \"${SHA}\"/" tap/Casks/bam.rb
           cd tap
-          if ! git diff --quiet Casks/bam.rb; then
+          git add Casks/bam.rb
+          # Stage first: `git diff` ignores untracked files, so a brand-new
+          # cask would never be detected. `--cached` sees new + modified.
+          if ! git diff --cached --quiet; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add Casks/bam.rb
             git commit -m "bam: bump to ${VERSION}"
             git push
           fi
