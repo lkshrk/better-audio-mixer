@@ -105,10 +105,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
-        let close = NSMenuItem(title: "Close", action: #selector(closeWindow), keyEquivalent: "w")
-        close.target = self
-        menu.addItem(close)
-
         let quit = NSMenuItem(title: "Quit BAM", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
@@ -122,8 +118,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let enabled = SMAppService.mainApp.status == .enabled
         try? enabled ? SMAppService.mainApp.unregister() : SMAppService.mainApp.register()
     }
-
-    @objc private func closeWindow() { window.performClose(nil) }
 
     @objc private func quit() { NSApp.terminate(nil) }
 }

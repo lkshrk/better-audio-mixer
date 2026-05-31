@@ -1,13 +1,14 @@
 {
   "UUID": "me.harke.bam",
   "SDKVersion": 2,
-  "Author": "harke",
+  "Author": "Lukas Harke",
   "Name": "Better Audio Mixer",
   "Description": "Remote control for the Better Audio Mixer per-app audio mixer.",
+  "URL": "https://github.com/lkshrk/better-audio-mixer",
   "Category": "Better Audio Mixer",
   "CategoryIcon": "icons/category",
-  "Icon": "icons/category",
-  "Version": "0.9.5.0",
+  "Icon": "icons/pluginIcon",
+  "Version": "0.9.6.0",
   "CodePath": "bin/BAMStreamDeck",
   "Software": {
     "MinimumVersion": "6.5"

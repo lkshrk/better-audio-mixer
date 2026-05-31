@@ -1,16 +1,18 @@
 name: Stream Deck Plugin
 
-# Builds, validates, signs, notarizes and packages the BAM Stream Deck plugin,
-# then attaches the .streamDeckPlugin to a GitHub release for the same
-# plugin-vX.Y.Z tag. The plugin versions independently of the app: app releases
-# use `vX.Y.Z` (release.yml + brew), the plugin uses `plugin-vX.Y.Z` here. The
-# produced .streamDeckPlugin is also the artifact uploaded to the Elgato
-# Marketplace Maker portal (no automated submission API — that step is manual).
-# Tag pushes do not match ci.yml's `branches: [main]`, so this never double-runs.
+# Manual-dispatch fallback for plugin-only rebuilds. Normal releases ship the
+# plugin alongside the app in release.yml (one vX.Y.Z release, both artifacts).
+# Use this only to re-cut the .streamDeckPlugin for an EXISTING vX.Y.Z release —
+# e.g. a plugin-side hotfix that doesn't warrant a new app build. It builds,
+# validates, signs, notarizes and packages the plugin, then re-uploads the asset
+# to that release (--clobber). The produced .streamDeckPlugin is also the
+# artifact uploaded to the Elgato Marketplace Maker portal (manual — no API).
 on:
-  push:
-    tags: ["plugin-v*"]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing release tag to attach the plugin to (e.g. v0.9.5)"
+        required: true
 
 permissions:
   contents: write
@@ -21,15 +23,16 @@ jobs:
     env:
       SIGNING_IDENTITY: ${{ secrets.SIGNING_IDENTITY }}
       DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
-      TAG: ${{ github.ref_name }}
+      TAG: ${{ inputs.release_tag }}
       PLUGIN_DIR: StreamDeck/me.harke.bam.sdPlugin
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.release_tag }}
 
       - name: Verify manifest version matches tag
-        if: startsWith(github.ref, 'refs/tags/')
         run: |
-          VER="${TAG#plugin-v}"
+          VER="${TAG#v}"
           MANIFEST_VER=$(/usr/bin/python3 -c 'import json;print(json.load(open("'"$PLUGIN_DIR"'/manifest.json"))["Version"])')
           if [ "${MANIFEST_VER%.*}" != "$VER" ]; then
             echo "::error::manifest Version ($MANIFEST_VER) does not match tag $TAG (expected ${VER}.N)"
@@ -40,9 +43,9 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode_16.app
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version: "22"
 
       - name: Import signing certificate
         env:

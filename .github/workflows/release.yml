@@ -42,7 +42,7 @@ jobs:
           fi
           echo "Found successful CI run for ${TARGET_SHA}."
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
@@ -59,6 +59,11 @@ jobs:
             echo "Release tag: $TAG"
           fi
 
+  # One release ships both artifacts: the notarized bam.app (bam.zip) and the
+  # notarized Stream Deck plugin (.streamDeckPlugin), attached to the same vX.Y.Z
+  # release. The plugin versions in lockstep with the app — its manifest Version
+  # must be X.Y.Z.N and is verified against the tag before anything is built.
+  # streamdeck.yml stays as a manual-dispatch fallback for plugin-only rebuilds.
   release:
     needs: gate
     if: needs.gate.outputs.tag != ''
@@ -67,14 +72,29 @@ jobs:
       DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
       SIGNING_IDENTITY: ${{ secrets.SIGNING_IDENTITY }}
       TAG: ${{ needs.gate.outputs.tag }}
+      PLUGIN_DIR: StreamDeck/me.harke.bam.sdPlugin
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ needs.gate.outputs.tag }}
           fetch-depth: 0
 
+      - name: Verify plugin manifest version matches tag
+        run: |
+          VER="${TAG#v}"
+          MANIFEST_VER=$(/usr/bin/python3 -c 'import json;print(json.load(open("'"$PLUGIN_DIR"'/manifest.json"))["Version"])')
+          if [ "${MANIFEST_VER%.*}" != "$VER" ]; then
+            echo "::error::plugin manifest Version ($MANIFEST_VER) does not match tag $TAG (expected ${VER}.N)"
+            exit 1
+          fi
+          echo "manifest $MANIFEST_VER matches tag $TAG"
+
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode_16.app
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -147,11 +167,60 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "$APP" bam.zip
           echo "sha256=$(shasum -a 256 bam.zip | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
-      - name: Create GitHub release
+      - name: Build plugin universal binary
+        run: |
+          cd BamKit
+          swift build -c release --arch arm64 --arch x86_64 --product BAMStreamDeck
+          BINDIR="$(swift build -c release --arch arm64 --arch x86_64 --product BAMStreamDeck --show-bin-path)"
+          echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
+
+      - name: Assemble & sign plugin bundle
+        run: |
+          mkdir -p "$PLUGIN_DIR/bin"
+          cp "$BINDIR/BAMStreamDeck" "$PLUGIN_DIR/bin/BAMStreamDeck"
+          lipo -info "$PLUGIN_DIR/bin/BAMStreamDeck"
+          codesign --force --options runtime --timestamp \
+            --sign "$SIGNING_IDENTITY" "$PLUGIN_DIR/bin/BAMStreamDeck"
+          codesign --verify --strict --verbose=2 "$PLUGIN_DIR/bin/BAMStreamDeck"
+
+      - name: Validate plugin (manifest, layouts, structure)
+        run: npx --yes @elgato/cli@latest validate "$PLUGIN_DIR"
+
+      - name: Notarize plugin
+        env:
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          echo "$NOTARY_KEY_P8" | base64 --decode > $RUNNER_TEMP/notary.p8
+          ditto -c -k --sequesterRsrc --keepParent "$PLUGIN_DIR" plugin.zip
+          SUBMIT_JSON=$(xcrun notarytool submit plugin.zip \
+            --key $RUNNER_TEMP/notary.p8 \
+            --key-id "$NOTARY_KEY_ID" \
+            --issuer "$NOTARY_ISSUER_ID" \
+            --output-format json --wait)
+          echo "$SUBMIT_JSON"
+          SUBMIT_ID=$(echo "$SUBMIT_JSON" | /usr/bin/python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+          STATUS=$(echo "$SUBMIT_JSON" | /usr/bin/python3 -c 'import sys,json;print(json.load(sys.stdin)["status"])')
+          xcrun notarytool log "$SUBMIT_ID" \
+            --key $RUNNER_TEMP/notary.p8 \
+            --key-id "$NOTARY_KEY_ID" \
+            --issuer "$NOTARY_ISSUER_ID" || true
+          if [ "$STATUS" != "Accepted" ]; then
+            echo "::error::Plugin notarization not accepted (status $STATUS) — see log above."
+            exit 1
+          fi
+          # A loose plugin bundle cannot be stapled; first launch relies on the
+          # online notarization check (document: first run needs network).
+
+      - name: Package .streamDeckPlugin
+        run: npx --yes @elgato/cli@latest pack "$PLUGIN_DIR" --output dist --force
+
+      - name: Create GitHub release (app + plugin)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$TAG" bam.zip \
+          gh release create "$TAG" bam.zip dist/me.harke.bam.streamDeckPlugin \
             --title "$TAG" \
             --generate-notes \
             --notes "sha256: \`${{ steps.pkg.outputs.sha256 }}\`"

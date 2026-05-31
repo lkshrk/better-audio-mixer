@@ -52,13 +52,11 @@ Three actions:
 
 ### Install the plugin
 
-Grab `me.harke.bam.streamDeckPlugin` from the matching
-[`plugin-vX.Y.Z` release](https://github.com/lkshrk/better-audio-mixer/releases)
-and double-click it to install. The plugin is signed and notarized; first launch
-needs a network connection for the online notarization check.
-
-The plugin versions independently of the app — app releases use `vX.Y.Z`, the
-plugin uses `plugin-vX.Y.Z`.
+The plugin ships in the same release as the app. Grab
+`me.harke.bam.streamDeckPlugin` from the
+[latest release](https://github.com/lkshrk/better-audio-mixer/releases/latest)
+and double-click it to install. It is signed and notarized; first launch needs a
+network connection for the online notarization check.
 
 ## Build from source
 

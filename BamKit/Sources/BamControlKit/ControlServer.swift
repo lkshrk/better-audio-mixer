@@ -418,6 +418,13 @@ public final class ControlServer: @unchecked Sendable {
             }
         }
 
+        // Master pos/mute diff — same event-driven shape as a mix delta, so a
+        // remote (Stream Deck) that changed the master sees its tile update.
+        if let pm = prev?.master, pm.pos != snap.master.pos || pm.muted != snap.master.muted {
+            deltaFrames.append(["t": "masterDelta", "pos": snap.master.pos,
+                                "pct": snap.master.pct, "muted": snap.master.muted])
+        }
+
         lastSnapshot = snap
 
         var dead: [Client] = []

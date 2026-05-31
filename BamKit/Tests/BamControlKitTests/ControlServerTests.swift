@@ -492,6 +492,32 @@ final class ControlServerTests: XCTestCase {
         XCTAssertNil(deltaFrame["level"], "Level must not appear in delta frame")
     }
 
+    func testSnapshotDiffEmitsMasterDeltaOnPosChange() async throws {
+        let (fd, buf) = try await handshake()
+        defer { Darwin.close(fd) }
+
+        _ = try await readFrameOfType(fd, buf: buf, type: "meter")
+
+        mock.setMasterPos(pos: 0.33)
+        pushSnapshot()
+
+        try await Task.sleep(for: .milliseconds(200))
+
+        var frame: [String: Any]? = nil
+        for _ in 0..<80 {
+            let f = try? await readFrame(fd, buf: buf, timeout: 0.3)
+            if let f, f["t"] as? String == "masterDelta" { frame = f; break }
+        }
+        guard let frame else {
+            XCTFail("Never received masterDelta frame after master pos change")
+            return
+        }
+        XCTAssertEqual(frame["pos"] as? Double, 0.33)
+        XCTAssertEqual(frame["pct"] as? Int, 33)
+        XCTAssertNotNil(frame["muted"])
+        XCTAssertNil(frame["level"], "Level must not appear in masterDelta frame")
+    }
+
     func testSnapshotDiffMeterOnlyNoUnneededDelta() async throws {
         let (fd, buf) = try await handshake()
         defer { Darwin.close(fd) }

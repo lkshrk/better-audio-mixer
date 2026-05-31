@@ -310,6 +310,7 @@ final class ActionRouter {
         switch obj["t"] as? String {
         case "state":   ingestState(obj); cacheMixes(); refreshAll(); sendMixesToPI()
         case "delta":   ingestDelta(obj); cacheMixes()
+        case "masterDelta": ingestMasterDelta(obj)
         case "removed": if let id = obj["mix"] as? String { mixes[id] = nil; levels[id] = nil; refreshAll(); cacheMixes() }
         case "meter":   ingestMeter(obj)
         case "mixes":   forwardMixesReply(obj)
@@ -395,6 +396,12 @@ final class ActionRouter {
         if let emoji = obj["emoji"] as? String { info.emoji = emoji }
         mixes[id] = info
         refreshMix(id)
+    }
+
+    private func ingestMasterDelta(_ obj: [String: Any]) {
+        if let pct = obj["pct"] as? Int { masterPct = pct }
+        if let muted = obj["muted"] as? Bool { masterMuted = muted }
+        for (ctx, b) in contexts where b.kind == .master || b.kind == .masterDial { refresh(ctx) }
     }
 
     private func forwardMixesReply(_ obj: [String: Any]) {
