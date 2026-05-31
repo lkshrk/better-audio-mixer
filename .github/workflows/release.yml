@@ -72,7 +72,7 @@ jobs:
       DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
       SIGNING_IDENTITY: ${{ secrets.SIGNING_IDENTITY }}
       TAG: ${{ needs.gate.outputs.tag }}
-      PLUGIN_DIR: StreamDeck/me.harke.bam.sdPlugin
+      PLUGIN_DIR: StreamDeck/me.harke.better-audio-mixer.sdPlugin
     steps:
       - uses: actions/checkout@v6
         with:
@@ -220,7 +220,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$TAG" bam.zip dist/me.harke.bam.streamDeckPlugin \
+          gh release create "$TAG" bam.zip dist/me.harke.better-audio-mixer.streamDeckPlugin \
             --title "$TAG" \
             --generate-notes \
             --notes "sha256: \`${{ steps.pkg.outputs.sha256 }}\`"

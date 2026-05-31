@@ -24,7 +24,7 @@ jobs:
       SIGNING_IDENTITY: ${{ secrets.SIGNING_IDENTITY }}
       DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
       TAG: ${{ inputs.release_tag }}
-      PLUGIN_DIR: StreamDeck/me.harke.bam.sdPlugin
+      PLUGIN_DIR: StreamDeck/me.harke.better-audio-mixer.sdPlugin
     steps:
       - uses: actions/checkout@v6
         with:
@@ -118,6 +118,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          ASSET="dist/me.harke.bam.streamDeckPlugin"
+          ASSET="dist/me.harke.better-audio-mixer.streamDeckPlugin"
           gh release upload "$TAG" "$ASSET" --clobber \
             || gh release create "$TAG" "$ASSET" --title "$TAG" --generate-notes

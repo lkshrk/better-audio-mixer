@@ -53,7 +53,7 @@ Three actions:
 ### Install the plugin
 
 The plugin ships in the same release as the app. Grab
-`me.harke.bam.streamDeckPlugin` from the
+`me.harke.better-audio-mixer.streamDeckPlugin` from the
 [latest release](https://github.com/lkshrk/better-audio-mixer/releases/latest)
 and double-click it to install. It is signed and notarized; first launch needs a
 network connection for the online notarization check.
@@ -85,7 +85,7 @@ xcodebuild -project bam.xcodeproj -scheme bam -configuration Debug \
 | `BamKit/Sources/AudioEngine/` | CoreAudio engine, process taps, mixer |
 | `BamKit/Sources/BamControlKit/` | Local control socket server (app ↔ plugin) |
 | `BamKit/Sources/BAMStreamDeck/` | Stream Deck plugin executable |
-| `StreamDeck/me.harke.bam.sdPlugin/` | Plugin bundle (manifest, PIs, layouts) |
+| `StreamDeck/me.harke.better-audio-mixer.sdPlugin/` | Plugin bundle (manifest, PIs, layouts) |
 | `BAMDriver/` | Virtual audio driver (C) |
 | `project.yml` | XcodeGen project definition |
 

@@ -8,7 +8,7 @@ import Foundation
 @MainActor
 final class ActionRouter {
 
-    private static let prefix = "me.harke.bam.streamdeck."
+    private static let prefix = "me.harke.better-audio-mixer.streamdeck."
 
     enum Kind {
         case device, master, deviceDial, masterDial, output, unknown

@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PLUGIN="$ROOT/StreamDeck/me.harke.bam.sdPlugin"
+PLUGIN="$ROOT/StreamDeck/me.harke.better-audio-mixer.sdPlugin"
 
 cd "$ROOT/BamKit"
 swift build -c release --product BAMStreamDeck
