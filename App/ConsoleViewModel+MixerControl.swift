@@ -72,10 +72,11 @@ extension ConsoleViewModel: MixerControl {
         }
     }
 
-    /// v2 stub: switching the live aggregate output re-taps every source (ear hazard +
-    /// dropout + TCC re-prompt), so the wire switch is gated on the v3 Mixer. Returns
-    /// false → ControlServer replies `error{code:"unsupported"}`.
+    /// Retargets the Default mix to the given hardware device — the same path the
+    /// in-app output picker uses (`setSystemOutput`). Rejects unknown/virtual UIDs.
     func setOutputDevice(uid: String) -> Bool {
-        false
+        guard hardwareOutputDevices.contains(where: { $0.uid == uid }) else { return false }
+        setSystemOutput(uid)
+        return true
     }
 }

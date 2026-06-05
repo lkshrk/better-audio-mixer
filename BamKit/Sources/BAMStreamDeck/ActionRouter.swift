@@ -315,6 +315,7 @@ final class ActionRouter {
         case "meter":   ingestMeter(obj)
         case "mixes":   forwardMixesReply(obj)
         case "outputs": ingestOutputs(obj)
+        case "outputs-ack": ingestOutputsAck(obj)
         case "error":   ingestError(obj)
         default:        break
         }
@@ -333,7 +334,17 @@ final class ActionRouter {
         sendOutputsToPI()
     }
 
-    /// v2: setOutputDevice is unsupported; flash an alert on the key that pressed it.
+    /// setOutputDevice succeeded: optimistically flip the active output so the key
+    /// glyph updates immediately, then re-request the live list to confirm.
+    private func ingestOutputsAck(_ obj: [String: Any]) {
+        pendingOutputContext = nil
+        if let uid = obj["uid"] as? String { activeOutputUID = uid }
+        for (ctx, b) in contexts where b.kind == .output { refresh(ctx) }
+        sendOutputsToPI()
+        sendToBAM?(["t": "listOutputs"])
+    }
+
+    /// setOutputDevice failed (unknown/virtual UID): flash an alert on the pressing key.
     private func ingestError(_ obj: [String: Any]) {
         guard (obj["op"] as? String) == "setOutputDevice" else { return }
         if let ctx = pendingOutputContext { elgato.showAlert(context: ctx) }
@@ -364,11 +375,13 @@ final class ActionRouter {
         }
     }
 
-    /// Ballistics for the LCD level meter: instant attack on a rising level,
-    /// eased decay on the way down. Without this the gbar flickers frame-to-frame
-    /// and reads as noise rather than a meter.
+    /// Ballistics for the LCD level meter: eased attack on a rising level, slower
+    /// eased decay on the way down. Instant attack made the gbar twitch on every
+    /// transient and read as hectic; damping both directions (fast-ish up, slow
+    /// down) gives a calmer VU-style needle without lagging the program level.
     private func smoothLevel(_ old: Float, _ new: Float) -> Float {
-        new >= old ? new : old + (new - old) * 0.35
+        let coeff: Float = new >= old ? 0.55 : 0.25
+        return old + (new - old) * coeff
     }
 
     private func ingestState(_ obj: [String: Any]) {

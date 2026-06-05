@@ -17,6 +17,10 @@ public actor CoreAudioEngine: AudioEngineProtocol {
     private var master: Double = 1.0
     private var outputDeviceUID: String?
     private var outputDeviceList: [OutputDeviceInfo] = []
+    /// The output UID the running aggregate is actually bound to, after live-list
+    /// resolution. May differ from the stored config UID when a device re-enumerated;
+    /// the view model reads this to persist the new UID.
+    private var _boundOutputUID: String?
     private var enforce = false
     private var entriesByGroup: [String: [SourceEntry]] = [:]
     private var chainByKey: [String: TapChain] = [:]
@@ -88,6 +92,37 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         ProcessEnumerator.defaultOutputDeviceUID()
     }
 
+    /// The output device the live aggregate is bound to (post live-list resolution).
+    public func boundOutputUID() -> String? { _boundOutputUID }
+
+    /// Re-bind a stored output UID to a currently-present device. Exact UID wins.
+    /// On miss, fall back to the single live device that shares the stored UID's
+    /// stable anchor (USB re-enumeration drifts the trailing instance index but
+    /// keeps the serial-bearing prefix); 0 or >1 matches → system default output.
+    static func resolveOutputUID(stored: String?) -> String? {
+        let live = ProcessEnumerator.systemOutputDevices()
+        if let stored, live.contains(where: { $0.uid == stored }) { return stored }
+        if let stored {
+            let key = stableOutputKey(stored)
+            let matches = live.filter { stableOutputKey($0.uid) == key }
+            if matches.count == 1 { return matches[0].uid }
+        }
+        return ProcessEnumerator.defaultOutputDeviceUID()
+    }
+
+    /// Stable portion of a device UID across re-enumeration. Apple USB engine UIDs
+    /// end in ":<instance>" that drifts on reconnect/wake, so drop it and anchor on
+    /// the serial-bearing prefix. Other UID schemes (e.g. a display's GUID_endpoint)
+    /// are returned whole so distinct endpoints of one device stay distinct.
+    static func stableOutputKey(_ uid: String) -> String {
+        guard uid.hasPrefix("AppleUSBAudioEngine:") else { return uid }
+        let parts = uid.split(separator: ":", omittingEmptySubsequences: false)
+        if parts.count > 1, let last = parts.last, !last.isEmpty, last.allSatisfy(\.isNumber) {
+            return parts.dropLast().joined(separator: ":")
+        }
+        return uid
+    }
+
     public func outputVolume(uid: String) -> Float? { Self.deviceVolume(uid: uid) }
 
     /// Synchronous, actor-free device-volume read (mirror of `setDeviceVolume`).
@@ -125,6 +160,20 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         guard let dev = ProcessEnumerator.deviceID(forUID: uid) else { return false }
         let main = CA.address(kAudioDevicePropertyMute, kAudioDevicePropertyScopeOutput)
         return CA.uint32(dev, main) != 0
+    }
+
+    /// Synchronous, actor-free mute write (mirror of `setDeviceVolume`). Safe from
+    /// app termination. Used to silence the device across an aggregate/tap teardown
+    /// or setup, during which CoreAudio briefly resets the device volume to 100%.
+    public nonisolated static func setDeviceMuted(uid: String, _ muted: Bool) {
+        guard let dev = ProcessEnumerator.deviceID(forUID: uid) else { return }
+        let v: UInt32 = muted ? 1 : 0
+        let main = CA.address(kAudioDevicePropertyMute, kAudioDevicePropertyScopeOutput)
+        if CA.isSettable(dev, main), CA.setUInt32(dev, main, v) { return }
+        for ch: AudioObjectPropertyElement in [1, 2] {
+            let a = CA.address(kAudioDevicePropertyMute, kAudioDevicePropertyScopeOutput, ch)
+            if CA.isSettable(dev, a) { CA.setUInt32(dev, a, v) }
+        }
     }
 
     public func setOutputMuted(uid: String, _ muted: Bool) {
@@ -197,14 +246,23 @@ public actor CoreAudioEngine: AudioEngineProtocol {
     /// aggregate and avoids self-capture feedback while the design is verified.
     public func startRouter(config: BamConfig) -> RouterStatus {
         // The single output everything mixes into: the hardware dest the picker
-        // drives (the Default device), else the system default output.
-        let outputUID = config.mixes.compactMap { mix -> String? in
+        // drives (the Default device), else the system default output. Resolve the
+        // stored UID against the live device list first — USB devices (e.g. the
+        // Razer wireless dongle) re-enumerate with a new trailing instance index,
+        // so the persisted UID can go stale while the device is still present.
+        let storedUID = config.mixes.compactMap { mix -> String? in
             if case .hardware(let uid) = mix.dest { return uid } else { return nil }
-        }.first ?? ProcessEnumerator.defaultOutputDeviceUID()
+        }.first
+        let outputUID = Self.resolveOutputUID(stored: storedUID)
         guard let outputUID else {
             bamLog("startRouter: no output device (no hardware dest, no default output) — all \(config.mixes.count) mixes offline", level: .error)
             router = nil
+            _boundOutputUID = nil
             return RouterStatus(failedMixIDs: config.mixes.map(\.id), cause: .noOutput)
+        }
+        _boundOutputUID = outputUID
+        if let storedUID, storedUID != outputUID {
+            bamLog("startRouter: stored output \(storedUID) absent → re-bound to \(outputUID)")
         }
 
         let allProcs = ProcessEnumerator.allProcesses()
@@ -321,8 +379,15 @@ public actor CoreAudioEngine: AudioEngineProtocol {
                 object: AudioObjectID(kAudioObjectSystemObject),
                 selector: kAudioHardwarePropertyDevices
             ) { continuation.yield(()) }
+            // Default-output switches (between two devices that both stay present)
+            // change no device LIST, so without this the router never re-resolves
+            // its fallback target and keeps routing to the old device.
+            let defL = ChangeListener(
+                object: AudioObjectID(kAudioObjectSystemObject),
+                selector: kAudioHardwarePropertyDefaultOutputDevice
+            ) { continuation.yield(()) }
             // Held by the actor so they outlive this closure; freed on deinit.
-            routerEventListeners.append(contentsOf: [procL, devL])
+            routerEventListeners.append(contentsOf: [procL, devL, defL])
         }
     }
 

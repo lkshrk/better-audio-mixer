@@ -49,6 +49,8 @@ public actor MockAudioEngine: AudioEngineProtocol {
 
     public func defaultOutputUID() -> String? { "MockOutput" }
 
+    public func boundOutputUID() -> String? { "MockOutput" }
+
     private var mockVolume: Float = 0.8
     public func outputVolume(uid: String) -> Float? { mockVolume }
     public func setOutputVolume(uid: String, _ volume: Float) { mockVolume = max(0, min(1, volume)) }

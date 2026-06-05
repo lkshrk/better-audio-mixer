@@ -113,7 +113,18 @@ final class ConsoleViewModel {
         }
         if activeMixID == nil { activeMixID = config.mixes.first?.id }
         await captureStockVolume()
+        // Creating the aggregate + taps triggers the same momentary 100% device-volume
+        // reset as teardown does. Mute across setup, restore stock, then unmute — this
+        // also clears any mute a previous interrupted exit may have stranded.
+        let setupUID = driverEnabled ? systemOutputUID : nil
+        if let setupUID { CoreAudioEngine.setDeviceMuted(uid: setupUID, true) }
         await subscribe()
+        if let setupUID {
+            let stock = defaults.object(forKey: Self.stockVolumeKey) != nil
+                ? defaults.double(forKey: Self.stockVolumeKey) : nil
+            if let stock { CoreAudioEngine.setDeviceVolume(uid: setupUID, Float(stock)) }
+            CoreAudioEngine.setDeviceMuted(uid: setupUID, false)
+        }
         startControlServer()
         await restoreOutputVolume()
     }
@@ -156,7 +167,7 @@ final class ConsoleViewModel {
 
     private func subscribe() async {
         if driverEnabled {
-            applyRouterStatus(await engine.startRouter(config: config))
+            await startRouterReconciling()
             subscribeRouterEvents()
             let stream = await engine.routerSnapshots()
             meterTask = Task { [weak self] in
@@ -181,7 +192,7 @@ final class ConsoleViewModel {
     /// Start or tear down the router live when the dev driver toggle flips.
     private func reloadRouter() async {
         if driverEnabled {
-            applyRouterStatus(await engine.startRouter(config: config))
+            await startRouterReconciling()
             subscribeRouterEvents()
             let stream = await engine.routerSnapshots()
             meterTask?.cancel()
@@ -196,6 +207,23 @@ final class ConsoleViewModel {
             applyRouterStatus(.ok)
             snapshot = .silent
         }
+    }
+
+    /// Start the router, fold its status, then persist any output UID the engine
+    /// had to re-bind: when the stored device re-enumerated under a new UID, the
+    /// engine resolves it against the live list, and we write the resolved UID back
+    /// so the Default mix points at the right device across restarts.
+    private func startRouterReconciling() async {
+        applyRouterStatus(await engine.startRouter(config: config))
+        guard let bound = await engine.boundOutputUID(),
+              let i = config.mixes.firstIndex(where: { $0.id == Self.defaultMixID })
+        else { return }
+        let current: String? = {
+            if case .hardware(let u) = config.mixes[i].dest { return u } else { return nil }
+        }()
+        guard current != bound else { return }
+        config.mixes[i].dest = .hardware(uid: bound)
+        persist(config)
     }
 
     /// Fold a `startRouter` result into UI state and (re)arm cause-aware recovery.
@@ -242,11 +270,15 @@ final class ConsoleViewModel {
             let events = await self.engine.routerEvents()
             for await _ in events {
                 guard !Task.isCancelled, self.driverEnabled else { return }
-                // Only rebuild when there is something to gain: currently failing,
-                // or idle and an app may now be running. A healthy router ignores
-                // the churn (the cheap reuse path no-ops anyway).
-                guard self.routerStatus.isFailure || self.routerStatus.cause == .noSourcesRunning else { continue }
-                self.applyRouterStatus(await self.engine.startRouter(config: self.config))
+                // Reflect device add/remove in the picker immediately instead of
+                // waiting on the 2s poll.
+                self.outputDevices = await self.engine.outputDevices()
+                // Always re-run: the engine's aggregate-signature check makes this a
+                // cheap no-op when the output and tap set are unchanged, but a HEALTHY
+                // router must still rebuild when its bound output device re-enumerated
+                // or the default-output target moved (the old gate skipped that case
+                // and left the aggregate bound to a dead device → silent speaker).
+                await self.startRouterReconciling()
             }
         }
     }
@@ -318,17 +350,70 @@ final class ConsoleViewModel {
 
     func setSystemOutput(_ uid: String) {
         let previous = systemOutputUID
-        applyTopology {
-            if let i = $0.mixes.firstIndex(where: { $0.id == Self.defaultMixID }) {
-                $0.mixes[i].dest = .hardware(uid: uid)
-            }
+        guard uid != previous else { return }
+        let target = outputVolume
+
+        // Hardware-mute BOTH the old and new device BEFORE the swap. The rebuild is
+        // break-before-make: tearing the old aggregate down resets the OLD device's
+        // scalar to 100%, and building the new taps resets the NEW device's — a
+        // CoreAudio quirk volume writes can't beat (the reset lands after the write),
+        // only a mute survives it. With both muted, neither device can blast across
+        // the swap; we unmute the old one and fade the new one up once it's live.
+        if let previous, previous != uid { CoreAudioEngine.setDeviceMuted(uid: previous, true) }
+        CoreAudioEngine.setDeviceMuted(uid: uid, true)
+
+        // Drive the topology change ourselves instead of via applyTopology: it
+        // fires startRouter as a detached Task, so we'd never know when the new
+        // device is actually up. We await the rebuild inline to get that signal.
+        var draft = config
+        if let i = draft.mixes.firstIndex(where: { $0.id == Self.defaultMixID }) {
+            draft.mixes[i].dest = .hardware(uid: uid)
         }
-        let muted = config.masterMuted
+        do { try draft.validate() } catch {
+            self.error = String(describing: error)
+            CoreAudioEngine.setDeviceMuted(uid: uid, false)
+            return
+        }
+        error = nil
+        config = draft
+        persist(draft)
+        guard driverEnabled else {
+            CoreAudioEngine.setDeviceMuted(uid: uid, false)
+            return
+        }
+
+        let muted = draft.masterMuted
+        restoringVolume = true
         Task {
-            // Don't leave the device we're leaving stuck muted at the OS level.
-            if let previous, previous != uid { await engine.setOutputMuted(uid: previous, false) }
-            await engine.setOutputMuted(uid: uid, muted)
-            await refreshOutputVolume()
+            defer { restoringVolume = false }
+            // Bring the new aggregate up and BLOCK until it's live. The rebuild is
+            // break-before-make (startRouter destroys the old aggregate, then builds
+            // the new one) and that swap can BOTH reset the new device's scalar to
+            // 100% AND clear the mute we set pre-build.
+            applyRouterStatus(await engine.startRouter(config: draft))
+
+            // So re-assert silence on the live device the moment the rebuild returns,
+            // before anything audible — never trust that the pre-build mute survived
+            // the aggregate swap. From here it's always: muted → 0 → reveal/fade.
+            CoreAudioEngine.setDeviceMuted(uid: uid, true)
+            await engine.setOutputVolume(uid: uid, 0)
+            outputVolume = 0
+            // Restore the device we left: the break-before-make teardown reset its
+            // scalar to 100%. The reset has already landed by now, so re-assert its
+            // prior level BEFORE unmuting — otherwise unmuting blasts it at 100%.
+            if let previous, previous != uid {
+                await engine.setOutputVolume(uid: previous, Float(target))
+                await engine.setOutputMuted(uid: previous, false)
+            }
+
+            if muted {
+                // Master is muted — hold at the saved level but keep the device silent.
+                await engine.setOutputVolume(uid: uid, Float(target))
+                outputVolume = target
+            } else {
+                CoreAudioEngine.setDeviceMuted(uid: uid, false)
+                await rampOutputVolume(uid: uid, from: 0, to: target)
+            }
         }
     }
 
@@ -403,6 +488,14 @@ final class ConsoleViewModel {
             ? defaults.double(forKey: Self.stockVolumeKey) : nil
         let current = CoreAudioEngine.deviceVolume(uid: uid).map(Double.init) ?? outputVolume
 
+        // The actual exit blast: CoreAudio momentarily resets the physical device
+        // volume to 100% while the aggregate + taps are torn down, before the level
+        // is reapplied. Setting the volume can't beat that (the reset lands after our
+        // write), so hardware-MUTE the device across the whole teardown and unmute it
+        // only once the correct level is back. Launch clears any stale mute, so an
+        // interrupted exit can't strand the device muted.
+        CoreAudioEngine.setDeviceMuted(uid: uid, true)
+
         func teardownBlocking() {
             let sem = DispatchSemaphore(value: 0)
             Task { await engine.stopRouter(); sem.signal() }
@@ -412,13 +505,15 @@ final class ConsoleViewModel {
         switch VolumePolicy.exit(applied: bamVolumeApplied, currentDeviceLevel: current, stockLevel: stock) {
         case .teardownOnly:
             teardownBlocking()
-        case let .persist(bamLevel, thenStock):
+        case let .persist(bamLevel, _):
             defaults.set(bamLevel, forKey: Self.savedVolumeKey)
             teardownBlocking()
-            if let thenStock {
-                CoreAudioEngine.setDeviceVolume(uid: uid, Float(thenStock))
-            }
         }
+
+        // Restore the stock level (the post-teardown device sits at the 100% reset)
+        // and only then drop the mute, so the device is never audible above stock.
+        if let stock { CoreAudioEngine.setDeviceVolume(uid: uid, Float(stock)) }
+        CoreAudioEngine.setDeviceMuted(uid: uid, false)
     }
 
     /// On launch: re-apply the volume we saved at last exit, but only once it is
@@ -442,6 +537,8 @@ final class ConsoleViewModel {
             await refreshOutputVolume()
             bamVolumeApplied = true
         case let .applySaved(v):
+            restoringVolume = true
+            defer { restoringVolume = false }
             if driverEnabled {
                 // Don't touch the volume during setup: the device stays at the user's
                 // stock level (raw apps play at their normal level — no spike) until our
@@ -450,8 +547,6 @@ final class ConsoleViewModel {
                 // `.mutedWhenTapped` is muting the apps and the summed mix becomes the
                 // only thing audible. No timer: if capture never confirms (silent system
                 // / permission denied) the device just stays at stock.
-                restoringVolume = true
-                defer { restoringVolume = false }
                 var held = 0
                 while held < 5, !Task.isCancelled {
                     held = captureConfirmed ? held + 1 : 0
@@ -459,10 +554,35 @@ final class ConsoleViewModel {
                 }
                 if Task.isCancelled { return }
             }
-            await engine.setOutputVolume(uid: uid, Float(v))
-            outputVolume = v
+            // Safe-to-raise point reached (event-gated above). Fade in from silence up
+            // to the saved level so the hand-off is audibly gradual — ramping from the
+            // current stock level was imperceptible whenever stock ≈ saved.
+            await rampOutputVolume(uid: uid, from: 0, to: v)
             bamVolumeApplied = true
         }
+    }
+
+    /// Cosmetic volume slew used *after* the event-based safe-to-raise gate. Steps
+    /// `from`→`to` over a short fixed transition (NOT a safety timer — the gate that
+    /// decides *whether* to raise is event-based upstream). Cancellable: app teardown
+    /// stops it wherever it is, and `restoringVolume` must stay true across the call
+    /// so the periodic poll doesn't fight the slew.
+    private func rampOutputVolume(uid: String, from: Double, to: Double) async {
+        guard abs(to - from) > 0.01 else {
+            await engine.setOutputVolume(uid: uid, Float(to)); outputVolume = to; return
+        }
+        await engine.setOutputVolume(uid: uid, Float(from)); outputVolume = from
+        let steps = 24
+        let stepDelay = Duration.milliseconds(50)   // ~1.2s total transition
+        for i in 1...steps {
+            if Task.isCancelled { return }
+            let v = from + (to - from) * (Double(i) / Double(steps))
+            await engine.setOutputVolume(uid: uid, Float(v))
+            outputVolume = v
+            try? await Task.sleep(for: stepDelay)
+        }
+        await engine.setOutputVolume(uid: uid, Float(to))
+        outputVolume = to
     }
 
     func setOutputVolume(_ v: Double) {

@@ -12,6 +12,10 @@ public protocol AudioEngineProtocol: Sendable {
     /// UID of the current system default output device (where the Default
     /// catch-all device should send so unassigned apps stay audible).
     func defaultOutputUID() async -> String?
+    /// UID the live router aggregate is actually bound to after resolving the
+    /// stored config UID against the live device list; nil if no output. Differs
+    /// from the stored UID when a device re-enumerated, so the caller can persist it.
+    func boundOutputUID() async -> String?
     /// Current OS volume scalar (0…1) of the given output device, nil if unknown.
     func outputVolume(uid: String) async -> Float?
     /// Set the OS volume scalar (0…1) of the given output device.
