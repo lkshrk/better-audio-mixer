@@ -42,9 +42,10 @@ talks to the running app over a local socket; the app must be running.
 Three actions:
 
 - **Device** — mute, adjust, or set the level of one app group. On a key it
-  renders a live tile (colored monogram, name, %, and a meter) in one of three
-  styles — Level Meter, Level Bars, or Radial Gauge — picked in the Property
-  Inspector. On a dial it shows an LCD band with the same controls.
+  renders a styled tile (colored monogram, name, %, and meter artwork) in one
+  of three styles — Level Meter, Level Bars, or Radial Gauge — picked in the
+  Property Inspector. On a dial it shows a smooth live LCD meter with the same
+  controls.
 - **Master** — the same, for the master bus.
 - **Output Device** — set or toggle the active hardware output. The key shows
   the same device icon the console uses (headphones, speaker, display…),
@@ -57,6 +58,13 @@ The plugin ships in the same release as the app. Grab
 [latest release](https://github.com/lkshrk/better-audio-mixer/releases/latest)
 and double-click it to install. It is signed and notarized; first launch needs a
 network connection for the online notarization check.
+
+## Diagnostics
+
+bam records compact logs for router recovery, audio-driver status, local
+control-socket events, and Stream Deck plugin connections. See
+[docs/logging-and-diagnostics.md](docs/logging-and-diagnostics.md) for useful
+log categories and support-report notes.
 
 ## Build from source
 

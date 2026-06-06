@@ -42,8 +42,8 @@ Implementation starts only on explicit "implement Phase 1" signal.
 - **NDJSON** — one JSON object per line. Flat envelope, `t` = type, no nested `data`.
 - **Versioned hello handshake.** `hello.v=1` → `hello-ack.v=1`. Mismatch → `{"t":"error","code":"version"}`
   then close; plugin shows "update" alert. Unknown `t` / unknown fields ignored (forward-compat).
-- **Split hot vs cold frames:** `meter` (level-only, ~12fps, high churn) separate from
-  `delta` (pos/mute change, event-driven, rare). Keeps the 12fps frame tiny.
+- **Split hot vs cold frames:** `meter` (level-only, ~30fps, high churn) separate from
+  `delta` (pos/mute change, event-driven, rare). Keeps the hot frame tiny.
 - **`level` stays raw dB float** on the wire (e.g. -18.3); plugin maps dB→0–100 using
   `RMSMeter.floorDB` as 0. Position/percent = perceptual taper values for the slider bar.
   Two domains, two bars.
@@ -112,12 +112,14 @@ updates a bar/gbar by **number**, text/pixmap by **string** (keyed by layout `ke
   (dB→0–100 mapped **in the plugin**, not the server).
 - Per-frame: `setFeedback {"title":"Game","value":"62%","slider":62,"meter":48}`.
 - Mute → `value:"MUTED"`, `meter:0`, slider unchanged (shows return point).
-- **Encoder redraw throttled to ~8fps** (coalesce; LCD can't take 12fps cleanly).
+- **Encoder redraw throttled below the source period** (~25ms guard for a ~30fps
+  source) so burst frames are dropped without aliasing steady 33ms meter frames.
 
 ## 6. Keys
 
-- **No live meter on keys in v1** (per-frame base64 PNG via `setImage` is heavy).
-  Keys show emoji + static %. Live key meters deferred to Phase 6.
+- **No per-frame live meter refresh on keys.** Keys use full base64 PNG `setImage`
+  payloads, so they refresh on state/setting changes and dedupe meter artwork to
+  the visible segmented states.
 
 ## 7. Actions (manifest)
 
@@ -168,7 +170,7 @@ BamKit/
   Sources/BamControlKit/   # MixerControl protocol, ControlServer, NDJSON, framing
   Sources/BAMStreamDeck/   # Swift plugin exe (WS client + UDS client)
 StreamDeck/
-  me.harke.bam.sdPlugin/   # manifest.json, PI html/js, layouts/band.json, icons, bin/
+  me.harke.better-audio-mixer.sdPlugin/   # manifest.json, PI html/js, layouts/band.json, icons, bin/
   PLAN.md                  # this file
 ```
 App deps += BamControlKit.
