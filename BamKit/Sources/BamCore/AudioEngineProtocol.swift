@@ -1,10 +1,6 @@
 import Foundation
 
 public protocol AudioEngineProtocol: Sendable {
-    func start(config: BamConfig) async -> AsyncStream<MeterSnapshot>
-    func update(config: BamConfig) async
-    func applyGains(config: BamConfig) async
-    func setEnforce(_ on: Bool) async
     func runningAudioApps() async -> [AudioApp]
     /// Bundle IDs of processes currently producing output audio (live playback).
     func playingBundleIDs() async -> Set<String>
@@ -26,7 +22,6 @@ public protocol AudioEngineProtocol: Sendable {
     func setOutputMuted(uid: String, _ muted: Bool) async
     func stop() async
 
-    // MARK: v3 router
     /// Build/rebuild the router from a v3 config (taps + mixes + destinations).
     /// Returns which mixes are offline and the dominant cause (for recovery).
     func startRouter(config: BamConfig) async -> RouterStatus
@@ -40,4 +35,8 @@ public protocol AudioEngineProtocol: Sendable {
     /// the moments when a previously failed `startRouter` might now succeed.
     /// Drives event-driven recovery instead of blind polling.
     func routerEvents() async -> AsyncStream<Void>
+    /// Emits automatic router health recovery attempts and rate-limit pauses.
+    func routerRecoveryEvents() async -> AsyncStream<RouterRecoveryEvent>
+    /// Clears any automatic recovery pause before a user-requested rebuild.
+    func resetRouterRecovery() async
 }

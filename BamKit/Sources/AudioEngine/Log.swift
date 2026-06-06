@@ -5,6 +5,7 @@ import os
 /// or stream live:
 ///   log stream --predicate 'subsystem == "me.harke.bam"'
 let engineLog = Logger(subsystem: "me.harke.bam", category: "audio")
+let engineSignposter = OSSignposter(logger: engineLog)
 
 /// Engine-wide log helper. Existing call sites pass just a message (debug level);
 /// failure paths can raise the level so they surface in Console without `--debug`.

@@ -59,17 +59,28 @@ targets:
       - path: AppTests
     dependencies:
       - target: bam
-      - package: BamKit
-        product: BamCore
-      - package: BamKit
-        product: AudioEngine
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: me.harke.bamTests
         GENERATE_INFOPLIST_FILE: YES
         SWIFT_VERSION: "6.0"
-        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/bam dev.app/Contents/MacOS/bam dev"
-        BUNDLE_LOADER: "$(TEST_HOST)"
+        TEST_HOST: ""
+        BUNDLE_LOADER: ""
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "\"$(BUILT_PRODUCTS_DIR)/bam dev.app/Contents/MacOS\""
+        HEADER_SEARCH_PATHS:
+          - "$(inherited)"
+          - "\"$(PROJECT_TEMP_DIR)/../../../SourcePackages/checkouts/Yams/Sources/CYaml/include\""
+          - "\"$(PROJECT_TEMP_DIR)/../../../SourcePackages/checkouts/swift-atomics/Sources/_AtomicsShims/include\""
+        OTHER_SWIFT_FLAGS:
+          - "$(inherited)"
+          - "-Xcc"
+          - "\"-fmodule-map-file=$(PROJECT_TEMP_DIR)/../../../SourcePackages/checkouts/Yams/Sources/CYaml/include/module.modulemap\""
+          - "-Xcc"
+          - "\"-fmodule-map-file=$(PROJECT_TEMP_DIR)/../../../SourcePackages/checkouts/swift-atomics/Sources/_AtomicsShims/include/module.modulemap\""
+        OTHER_LDFLAGS:
+          - "\"$(BUILT_PRODUCTS_DIR)/bam dev.app/Contents/MacOS/bam dev.debug.dylib\""
 schemes:
   bam:
     build:
@@ -82,3 +93,10 @@ schemes:
       config: Debug
       targets:
         - bamTests
+      postActions:
+        - name: Cleanup bam test host
+          settingsTarget: bam
+          script: |
+            if [ -n "$BUILT_PRODUCTS_DIR" ]; then
+              /usr/bin/pkill -f "$BUILT_PRODUCTS_DIR/bam dev.app/Contents/MacOS/[b]am dev" || true
+            fi

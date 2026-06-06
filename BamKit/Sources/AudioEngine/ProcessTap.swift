@@ -11,6 +11,10 @@ final class ProcessTap {
     init?(description: CATapDescription) {
         description.isPrivate = true
 
+        let signpostID = engineSignposter.makeSignpostID()
+        let signpostState = engineSignposter.beginInterval("ProcessTap.create", id: signpostID)
+        defer { engineSignposter.endInterval("ProcessTap.create", signpostState) }
+
         var id = AudioObjectID(kAudioObjectUnknown)
         guard AudioHardwareCreateProcessTap(description, &id) == noErr,
               id != AudioObjectID(kAudioObjectUnknown) else { return nil }
@@ -23,10 +27,17 @@ final class ProcessTap {
         self.tapID = id
         self.uuid = description.uuid.uuidString
         self.format = fmt
+        engineLog.debug(
+            "processTap uid=\(description.deviceUID ?? "any", privacy: .private) stream=\(description.stream.map(String.init) ?? "any", privacy: .public) mixdown=\(description.isMixdown, privacy: .public) mono=\(description.isMono, privacy: .public) exclusive=\(description.isExclusive, privacy: .public) sr=\(fmt.mSampleRate, privacy: .public) ch=\(fmt.mChannelsPerFrame, privacy: .public) flags=\(fmt.mFormatFlags, privacy: .public) bytesFrame=\(fmt.mBytesPerFrame, privacy: .public)"
+        )
     }
 
     deinit {
         AudioHardwareDestroyProcessTap(tapID)
+    }
+
+    func currentFormat() -> AudioStreamBasicDescription? {
+        Self.readFormat(tapID)
     }
 
     private static func readFormat(_ tapID: AudioObjectID) -> AudioStreamBasicDescription? {

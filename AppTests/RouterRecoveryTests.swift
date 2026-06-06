@@ -73,6 +73,57 @@ final class RouterRecoveryTests: XCTestCase {
         await model.stop()
     }
 
+    func testDiagnosticsSnapshotSummarizesRouterState() async {
+        let mock = MockAudioEngine()
+        await mock.scriptRouterStatuses([
+            RouterStatus(failedMixIDs: ["m0"], cause: .noOutput),
+        ])
+        let model = ConsoleViewModel(engine: mock, defaults: defaults)
+        await model.startMock(config: config())
+
+        let diagnostics = await model.diagnosticsSnapshot()
+
+        XCTAssertTrue(diagnostics.driverEnabled)
+        XCTAssertEqual(diagnostics.routerCause, .noOutput)
+        XCTAssertEqual(diagnostics.failedMixIDs, ["m0"])
+        XCTAssertEqual(diagnostics.mixCount, 2)
+        XCTAssertEqual(diagnostics.sourceCount, 2)
+        XCTAssertEqual(diagnostics.audioRecoveryState, model.audioRecoveryDisplayState)
+        XCTAssertEqual(diagnostics.boundOutputUID, "MockOutput")
+        XCTAssertNil(diagnostics.controlServer)
+
+        let report = await model.diagnosticsReport()
+        XCTAssertTrue(report.contains("routerCause: noOutput"))
+        XCTAssertTrue(report.contains("failedMixIDs: m0"))
+        XCTAssertTrue(report.contains("boundOutputUID: MockOutput"))
+        await model.stop()
+    }
+
+    func testDriverToggleOffCancelsRouterSubscriptions() async {
+        let mock = MockAudioEngine()
+        await mock.scriptRouterStatuses([
+            RouterStatus(failedMixIDs: ["m0"], cause: .noOutput),
+            .ok,
+        ])
+        let model = ConsoleViewModel(engine: mock, defaults: defaults)
+        await model.startMock(config: config())
+
+        XCTAssertEqual(model.routerStatus.cause, .noOutput)
+        let callsBeforeDisable = await mock.startRouterCalls
+        XCTAssertEqual(callsBeforeDisable, 1)
+
+        model.driverEnabled = false
+        let disabled = await eventually { model.routerStatus.cause == .ok && model.snapshot == .silent }
+        XCTAssertTrue(disabled)
+
+        await mock.emitRouterEvent()
+        try? await Task.sleep(for: .milliseconds(100))
+
+        let callsAfterStaleEvent = await mock.startRouterCalls
+        XCTAssertEqual(callsAfterStaleEvent, 1, "disabled router must ignore stale event subscriptions")
+        await model.stop()
+    }
+
     /// `permissionPending` surfaces a permission message and the bounded backoff
     /// heartbeat retries until the grant lands (scripted as the next `.ok`).
     func testPermissionPendingRecoversViaHeartbeat() async {
@@ -93,6 +144,95 @@ final class RouterRecoveryTests: XCTestCase {
         let healed = await eventually(4.0) { model.failedMixIDs.isEmpty }
         XCTAssertTrue(healed, "permissionPending heartbeat should retry and recover")
         XCTAssertEqual(model.routerStatus.cause, .ok)
+        await model.stop()
+    }
+
+    func testPermissionHeartbeatUsesCentralStatusFoldWhenRecovered() async {
+        let mock = MockAudioEngine()
+        await mock.scriptRouterStatuses([
+            RouterStatus(failedMixIDs: ["m0"], cause: .permissionPending),
+            .ok,
+        ])
+        let model = ConsoleViewModel(engine: mock, defaults: defaults)
+        await model.startMock(config: config())
+
+        await mock.emitRouterRecoveryEvent(.paused(
+            reason: "silent render",
+            attempts: 3,
+            window: 120,
+            cooldown: 300
+        ))
+        let paused = await eventually { model.audioRecoveryDisplayState.isActionable }
+        XCTAssertTrue(paused)
+
+        let healed = await eventually(4.0) { model.routerStatus.cause == .ok }
+        XCTAssertTrue(healed, "permissionPending heartbeat should retry and recover")
+        XCTAssertEqual(model.audioRecoveryDisplayState, .ok)
+        await model.stop()
+    }
+
+    func testRecoveryPauseEventShowsActionableStatus() async {
+        let mock = MockAudioEngine()
+        let model = ConsoleViewModel(engine: mock, defaults: defaults)
+        await model.startMock(config: config())
+
+        await mock.emitRouterRecoveryEvent(.paused(
+            reason: "source tap stalled",
+            attempts: 3,
+            window: 120,
+            cooldown: 300
+        ))
+
+        let shown = await eventually {
+            model.audioRecoveryDisplayState == .paused(
+                reason: "source tap stalled",
+                attempts: 3,
+                window: "2 min",
+                cooldown: "5 min"
+            )
+        }
+        XCTAssertTrue(shown)
+        XCTAssertTrue(model.audioRecoveryDisplayState.isActionable)
+        await model.stop()
+    }
+
+    func testRecoveryAttemptIsVisibleButNotActionable() async {
+        let mock = MockAudioEngine()
+        let model = ConsoleViewModel(engine: mock, defaults: defaults)
+        await model.startMock(config: config())
+
+        await mock.emitRouterRecoveryEvent(.attempting(reason: "silent render", attempt: 2))
+
+        let shown = await eventually {
+            model.audioRecoveryDisplayState == .recovering(reason: "silent render", attempt: 2)
+        }
+        XCTAssertTrue(shown)
+        XCTAssertFalse(model.audioRecoveryDisplayState.isActionable)
+        await model.stop()
+    }
+
+    func testRestartAudioClearsPausedRecoveryAndRebuilds() async {
+        let mock = MockAudioEngine()
+        let model = ConsoleViewModel(engine: mock, defaults: defaults)
+        await model.startMock(config: config())
+        let callsBeforeRestart = await mock.startRouterCalls
+
+        await mock.emitRouterRecoveryEvent(.paused(
+            reason: "source tap stalled",
+            attempts: 3,
+            window: 120,
+            cooldown: 300
+        ))
+        let paused = await eventually { model.audioRecoveryDisplayState.isActionable }
+        XCTAssertTrue(paused)
+
+        await model.restartAudio()
+
+        XCTAssertEqual(model.audioRecoveryDisplayState, .ok)
+        let resetCalls = await mock.resetRouterRecoveryCalls
+        let callsAfterRestart = await mock.startRouterCalls
+        XCTAssertEqual(resetCalls, 1)
+        XCTAssertEqual(callsAfterRestart, callsBeforeRestart + 1)
         await model.stop()
     }
 }

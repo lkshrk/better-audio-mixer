@@ -12,7 +12,7 @@ public final class MockMixerControl: MixerControl {
     public var mixes: [MixSnapshot]
     public var masterSnapshot: MasterSnapshot
     public var outputs: [OutputSnapshot]
-    /// v2 default: switching is unsupported (false). Tests flip this to exercise v3 path.
+    /// Tests flip this to exercise successful and rejected output switches.
     public var outputSwitchSupported: Bool = false
 
     public init(
@@ -36,7 +36,8 @@ public final class MockMixerControl: MixerControl {
         mutate(mixID: mixID) { s in
             MixSnapshot(id: s.id, name: s.name, emoji: s.emoji,
                         pos: pos, pct: Int((pos * 100).rounded()),
-                        muted: s.muted, level: s.level)
+                        muted: s.muted, level: s.level,
+                        levelLeft: s.levelLeft, levelRight: s.levelRight)
         }
     }
 
@@ -46,7 +47,8 @@ public final class MockMixerControl: MixerControl {
             let newPos = min(1, max(0, s.pos + delta))
             return MixSnapshot(id: s.id, name: s.name, emoji: s.emoji,
                                pos: newPos, pct: Int((newPos * 100).rounded()),
-                               muted: s.muted, level: s.level)
+                               muted: s.muted, level: s.level,
+                               levelLeft: s.levelLeft, levelRight: s.levelRight)
         }
     }
 
@@ -54,7 +56,8 @@ public final class MockMixerControl: MixerControl {
         calls.append(.setMuted(mixID: mixID, muted: muted))
         mutate(mixID: mixID) { s in
             MixSnapshot(id: s.id, name: s.name, emoji: s.emoji,
-                        pos: s.pos, pct: s.pct, muted: muted, level: s.level)
+                        pos: s.pos, pct: s.pct, muted: muted, level: s.level,
+                        levelLeft: s.levelLeft, levelRight: s.levelRight)
         }
     }
 
@@ -62,7 +65,8 @@ public final class MockMixerControl: MixerControl {
         calls.append(.toggleMuted(mixID: mixID))
         mutate(mixID: mixID) { s in
             MixSnapshot(id: s.id, name: s.name, emoji: s.emoji,
-                        pos: s.pos, pct: s.pct, muted: !s.muted, level: s.level)
+                        pos: s.pos, pct: s.pct, muted: !s.muted, level: s.level,
+                        levelLeft: s.levelLeft, levelRight: s.levelRight)
         }
     }
 
@@ -70,20 +74,29 @@ public final class MockMixerControl: MixerControl {
         calls.append(.setMasterPos(pos: pos))
         let p = min(1, max(0, pos))
         masterSnapshot = MasterSnapshot(pos: p, pct: Int((p * 100).rounded()),
-                                        muted: masterSnapshot.muted, level: masterSnapshot.level)
+                                        muted: masterSnapshot.muted, level: masterSnapshot.level,
+                                        levelLeft: masterSnapshot.levelLeft,
+                                        levelRight: masterSnapshot.levelRight,
+                                        icon: masterSnapshot.icon)
     }
 
     public func nudgeMasterPos(delta: Double) {
         calls.append(.nudgeMasterPos(delta: delta))
         let p = min(1, max(0, masterSnapshot.pos + delta))
         masterSnapshot = MasterSnapshot(pos: p, pct: Int((p * 100).rounded()),
-                                        muted: masterSnapshot.muted, level: masterSnapshot.level)
+                                        muted: masterSnapshot.muted, level: masterSnapshot.level,
+                                        levelLeft: masterSnapshot.levelLeft,
+                                        levelRight: masterSnapshot.levelRight,
+                                        icon: masterSnapshot.icon)
     }
 
     public func setMasterMuted(muted: Bool) {
         calls.append(.setMasterMuted(muted: muted))
         masterSnapshot = MasterSnapshot(pos: masterSnapshot.pos, pct: masterSnapshot.pct,
-                                        muted: muted, level: masterSnapshot.level)
+                                        muted: muted, level: masterSnapshot.level,
+                                        levelLeft: masterSnapshot.levelLeft,
+                                        levelRight: masterSnapshot.levelRight,
+                                        icon: masterSnapshot.icon)
     }
 
     public func listMixes() -> [MixSnapshot] { mixes }

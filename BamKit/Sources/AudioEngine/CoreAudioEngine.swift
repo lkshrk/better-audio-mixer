@@ -4,35 +4,55 @@ import CoreAudio
 import Foundation
 
 public actor CoreAudioEngine: AudioEngineProtocol {
-    private struct SourceEntry {
-        let key: String
-        let bundleID: String
-        let displayName: String
-        let deviceUID: String
-        let deviceName: String
-        let chain: TapChain
+    typealias ChangeListenerFactory = @Sendable (
+        AudioObjectID,
+        AudioObjectPropertySelector,
+        @escaping @Sendable () -> Void
+    ) -> any ChangeListenerToken
+
+    private final class ChangeListenerFactoryStore: @unchecked Sendable {
+        private let lock = NSLock()
+        private var override: ChangeListenerFactory?
+
+        func set(_ factory: ChangeListenerFactory?) {
+            lock.lock()
+            override = factory
+            lock.unlock()
+        }
+
+        func make(
+            object: AudioObjectID,
+            selector: AudioObjectPropertySelector,
+            onChange: @escaping @Sendable () -> Void
+        ) -> any ChangeListenerToken {
+            lock.lock()
+            let factory = override
+            lock.unlock()
+            if let factory {
+                return factory(object, selector, onChange)
+            }
+            return ChangeListener(object: object, selector: selector, onChange: onChange)
+        }
     }
 
-    private var groups: [Group] = []
-    private var master: Double = 1.0
-    private var outputDeviceUID: String?
-    private var outputDeviceList: [OutputDeviceInfo] = []
+    private static let changeListenerFactoryStore = ChangeListenerFactoryStore()
+
+    static func setChangeListenerFactoryForTests(_ factory: ChangeListenerFactory?) async {
+        changeListenerFactoryStore.set(factory)
+    }
+
     /// The output UID the running aggregate is actually bound to, after live-list
     /// resolution. May differ from the stored config UID when a device re-enumerated;
     /// the view model reads this to persist the new UID.
     private var _boundOutputUID: String?
-    private var enforce = false
-    private var entriesByGroup: [String: [SourceEntry]] = [:]
-    private var chainByKey: [String: TapChain] = [:]
-    private var masterChain: TapChain?
-    private var allAudioChain: TapChain?
-    private var listener: ChangeListener?
-    private var samplerTask: Task<Void, Never>?
 
-    // v3 router: one aggregate (all source taps + the selected output) summing
+    // Router: one aggregate (all source taps + the selected output) summing
     // each tap × its gain in a single hardware-clocked IOProc.
     private var router: RouterAggregate?
     private var routerConfig: BamConfig?
+    private var routerHealthBaseline: RouterHealthBaseline?
+    private var routerHealthTask: Task<Void, Never>?
+    private var routerRecoveryPolicy = RouterRecoveryPolicy()
     private var routerSamplerTask: Task<Void, Never>?
     /// Live process taps kept ALIVE across topology edits, keyed by source id.
     /// `sig` is the tap's target-process signature; a tap is reused as long as
@@ -44,43 +64,34 @@ public actor CoreAudioEngine: AudioEngineProtocol {
     /// only its gains are refolded — no rebuild, no offline flash.
     private var routerTapSig: String?
 
+    private struct SourceFormat: Equatable {
+        let sampleRate: Double
+        let channels: Int
+    }
+
+    private struct RouterHealthBaseline {
+        let outputUID: String
+        let outputSampleRate: Double?
+        let sourceFormats: [String: SourceFormat]
+    }
+
+    private struct RouterHealthState {
+        var lastFires = -1
+        var staleSamples = 0
+        var noInputSamples = 0
+        var renderSilentSamples = 0
+        var outputFormatDriftSamples = 0
+        var sourceFormatDriftSamples: [String: Int] = [:]
+        var lastSourceFrames: [String: Int] = [:]
+        var sourceStaleSamples: [String: Int] = [:]
+        var expectedSilentSamples: [String: Int] = [:]
+    }
+
+    private static let healthSilenceDB: Float = -72
+    private static let healthOutputSilencePeak: Float = 0.00025
+    private static let healthGainFloor: Double = 0.0001
+
     public init() {}
-
-    public func start(config: BamConfig) -> AsyncStream<MeterSnapshot> {
-        groups = config.groups
-        master = config.master
-        outputDeviceUID = config.outputDeviceUID
-        masterChain = TapChain(
-            description: CATapDescription(stereoGlobalTapButExcludeProcesses: [])
-        )
-        rebuild()
-        listener = ChangeListener(
-            object: AudioObjectID(kAudioObjectSystemObject),
-            selector: kAudioHardwarePropertyProcessObjectList
-        ) { [weak self] in
-            Task { await self?.rebuild() }
-        }
-
-        return AsyncStream { continuation in
-            let task = Task { [weak self] in
-                while !Task.isCancelled {
-                    guard let self else { break }
-                    continuation.yield(await self.snapshot())
-                    try? await Task.sleep(for: .milliseconds(100))
-                }
-                continuation.finish()
-            }
-            self.samplerTask = task
-            continuation.onTermination = { _ in task.cancel() }
-        }
-    }
-
-    public func update(config: BamConfig) {
-        groups = config.groups
-        master = config.master
-        outputDeviceUID = config.outputDeviceUID
-        rebuild()
-    }
 
     public func outputDevices() -> [AudioDevice] {
         ProcessEnumerator.systemOutputDevices().map {
@@ -110,6 +121,19 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         return ProcessEnumerator.defaultOutputDeviceUID()
     }
 
+    /// Process taps must follow where apps are actually emitting audio, not where
+    /// bam will render the mixed output. If the user picks speakers in bam while
+    /// Brave is still playing to the macOS default Razer device, binding the tap
+    /// to speakers captures nothing and the raw audio keeps playing on Razer.
+    static func tapCaptureOutputUID(targetOutputUID: String, defaultOutputUID: String?) -> String {
+        defaultOutputUID ?? targetOutputUID
+    }
+
+    private static func tapCaptureOutputUID(targetOutputUID: String) -> String {
+        tapCaptureOutputUID(targetOutputUID: targetOutputUID,
+                            defaultOutputUID: ProcessEnumerator.defaultOutputDeviceUID())
+    }
+
     /// Stable portion of a device UID across re-enumeration. Apple USB engine UIDs
     /// end in ":<instance>" that drifts on reconnect/wake, so drop it and anchor on
     /// the serial-bearing prefix. Other UID schemes (e.g. a display's GUID_endpoint)
@@ -124,6 +148,11 @@ public actor CoreAudioEngine: AudioEngineProtocol {
     }
 
     public func outputVolume(uid: String) -> Float? { Self.deviceVolume(uid: uid) }
+
+    private static func deviceSampleRate(uid: String) -> Double? {
+        guard let dev = ProcessEnumerator.deviceID(forUID: uid) else { return nil }
+        return CA.float64(dev, CA.address(kAudioDevicePropertyNominalSampleRate))
+    }
 
     /// Synchronous, actor-free device-volume read (mirror of `setDeviceVolume`).
     public nonisolated static func deviceVolume(uid: String) -> Float? {
@@ -193,18 +222,6 @@ public actor CoreAudioEngine: AudioEngineProtocol {
             .map(\.bundleID))
     }
 
-    public func applyGains(config: BamConfig) {
-        groups = config.groups
-        master = config.master
-        pushGains()
-    }
-
-    public func setEnforce(_ on: Bool) {
-        guard on != enforce else { return }
-        enforce = on
-        rebuild()
-    }
-
     public func runningAudioApps() -> [AudioApp] {
         let selfBundle = Bundle.main.bundleIdentifier
         var seen = Set<String>()
@@ -226,25 +243,18 @@ public actor CoreAudioEngine: AudioEngineProtocol {
     }
 
     public func stop() {
-        samplerTask?.cancel()
-        samplerTask = nil
-        listener = nil
-        entriesByGroup = [:]
-        chainByKey = [:]
-        allAudioChain = nil
-        masterChain = nil
+        stopRouter()
     }
 
-    // MARK: - v3 router
-
-    /// Build the central router from a v3 config: one capture tap per grouped
+    /// Build the central router from a config: one capture tap per grouped
     /// source, all gathered with the selected output device into a single
     /// hardware-clocked aggregate that sums each tap × its gain to the output.
     /// Returns mix ids that could not be brought online (empty on success).
-    ///
-    /// First pass omits the remainder (ungrouped) tap: it isolates the summing
-    /// aggregate and avoids self-capture feedback while the design is verified.
     public func startRouter(config: BamConfig) -> RouterStatus {
+        let signpostID = engineSignposter.makeSignpostID()
+        let signpostState = engineSignposter.beginInterval("CoreAudioEngine.startRouter", id: signpostID)
+        defer { engineSignposter.endInterval("CoreAudioEngine.startRouter", signpostState) }
+
         // The single output everything mixes into: the hardware dest the picker
         // drives (the Default device), else the system default output. Resolve the
         // stored UID against the live device list first — USB devices (e.g. the
@@ -262,7 +272,15 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         }
         _boundOutputUID = outputUID
         if let storedUID, storedUID != outputUID {
-            bamLog("startRouter: stored output \(storedUID) absent → re-bound to \(outputUID)")
+            engineLog.debug(
+                "startRouter: stored output absent stored=\(storedUID, privacy: .private) rebound=\(outputUID, privacy: .private)"
+            )
+        }
+        let captureUID = Self.tapCaptureOutputUID(targetOutputUID: outputUID)
+        if captureUID != outputUID {
+            engineLog.debug(
+                "startRouter: capture/render split capture=\(captureUID, privacy: .private) render=\(outputUID, privacy: .private)"
+            )
         }
 
         let allProcs = ProcessEnumerator.allProcesses()
@@ -280,9 +298,9 @@ public actor CoreAudioEngine: AudioEngineProtocol {
                 .sorted()
             guard !procIDs.isEmpty else { continue }
             groupedObjectIDs.append(contentsOf: procIDs)
-            let sig = "app:" + procIDs.map(String.init).joined(separator: ",")
+            let sig = "app:\(captureUID):0:" + procIDs.map(String.init).joined(separator: ",")
             desired.append((source.id, sig, {
-                let desc = CATapDescription(stereoMixdownOfProcesses: procIDs)
+                let desc = CATapDescription(processes: procIDs, deviceUID: captureUID, stream: 0)
                 desc.muteBehavior = .mutedWhenTapped
                 return desc
             }))
@@ -299,9 +317,9 @@ public actor CoreAudioEngine: AudioEngineProtocol {
             if let selfObj = ProcessEnumerator.processObject(forPID: getpid()) {
                 exclude.append(selfObj)
             }
-            let sig = "rest:" + exclude.sorted().map(String.init).joined(separator: ",")
+            let sig = "rest:\(captureUID):0:" + exclude.sorted().map(String.init).joined(separator: ",")
             desired.append((rest.id, sig, {
-                let desc = CATapDescription(stereoGlobalTapButExcludeProcesses: exclude)
+                let desc = CATapDescription(excludingProcesses: exclude, deviceUID: captureUID, stream: 0)
                 desc.muteBehavior = .mutedWhenTapped
                 return desc
             }))
@@ -331,6 +349,9 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         // No grouped app is running yet → nothing to route. Idle, not offline.
         guard !orderedTaps.isEmpty else {
             router = nil; routerTapSig = nil
+            routerHealthBaseline = nil
+            routerHealthTask?.cancel()
+            routerHealthTask = nil
             return RouterStatus(cause: .noSourcesRunning)
         }
 
@@ -348,54 +369,332 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         // the swap: their apps remain muted, so the gap is brief silence, never an
         // unmute blast. Destroying the old aggregate first also frees the fixed
         // UID so the new build cannot collide with a live device (bug-172/174).
+        routerHealthTask?.cancel()
+        routerHealthTask = nil
+        routerHealthBaseline = nil
         router = nil
+        let aggregateSignpostID = engineSignposter.makeSignpostID()
+        let aggregateSignpostState = engineSignposter.beginInterval("CoreAudioEngine.rebuildAggregate", id: aggregateSignpostID)
         guard let agg = RouterAggregate(outputUID: outputUID, taps: orderedTaps) else {
+            engineSignposter.endInterval("CoreAudioEngine.rebuildAggregate", aggregateSignpostState)
             bamLog("startRouter: aggregate build failed (\(orderedTaps.count) taps, output \(outputUID)) — likely audio-capture permission not yet granted; \(config.mixes.count) mixes offline", level: .error)
             routerTapSig = nil
             return RouterStatus(failedMixIDs: config.mixes.map(\.id), cause: .permissionPending)
         }
+        engineSignposter.endInterval("CoreAudioEngine.rebuildAggregate", aggregateSignpostState)
         applyRouterGains(config, to: agg)
         router = agg
         routerTapSig = aggSig
-        bamLog("startRouter: aggregate live with \(orderedTaps.count) taps → \(outputUID)")
+        routerHealthBaseline = RouterHealthBaseline(
+            outputUID: outputUID,
+            outputSampleRate: Self.deviceSampleRate(uid: outputUID),
+            sourceFormats: Dictionary(uniqueKeysWithValues: orderedTaps.map {
+                ($0.sourceID, SourceFormat(
+                    sampleRate: $0.proc.format.mSampleRate,
+                    channels: Int($0.proc.format.mChannelsPerFrame)
+                ))
+            })
+        )
+        startRouterHealthMonitor(signature: aggSig)
+        engineLog.notice(
+            "startRouter: aggregate live taps=\(orderedTaps.count, privacy: .public) output=\(outputUID, privacy: .private)"
+        )
+        emitRouterRecoveryEvent(.recovered)
         return .ok
+    }
+
+    private func startRouterHealthMonitor(signature: String) {
+        routerHealthTask?.cancel()
+        routerHealthTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            var state = RouterHealthState()
+            while !Task.isCancelled {
+                guard let self else { break }
+                let shouldContinue = await self.checkRouterHealth(
+                    signature: signature,
+                    state: &state
+                )
+                if !shouldContinue { break }
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+    }
+
+    private func checkRouterHealth(
+        signature: String,
+        state: inout RouterHealthState
+    ) -> Bool {
+        guard routerTapSig == signature, let router, let config = routerConfig else { return false }
+        let h = router.healthSnapshot()
+        let sourceHealth = router.sourceHealthSnapshots()
+        let sourceHealthByID = Dictionary(uniqueKeysWithValues: sourceHealth.map { ($0.sourceID, $0) })
+        let processSnapshot = ProcessEnumerator.allProcesses()
+        let expectedSourceIDs = expectedAudibleSourceIDs(config: config, processes: processSnapshot)
+
+        if h.fires == state.lastFires || !h.hasAdvancedIO {
+            state.staleSamples += 1
+        } else {
+            state.staleSamples = 0
+        }
+        state.lastFires = h.fires
+
+        if !h.hasExpectedInput {
+            state.noInputSamples += 1
+        } else {
+            state.noInputSamples = 0
+        }
+
+        if state.staleSamples >= 3 || state.noInputSamples >= 3 {
+            bamLog("router health failed: fires=\(h.fires) inBufs=\(h.inputBuffers) inCh=\(h.inputChannels) inFrames=\(h.inputFrames) outBufs=\(h.outputBuffers) outCh=\(h.outputChannels) outFrames=\(h.outputFrames); rebuilding aggregate", level: .error)
+            recoverRouterAfterHealthFailure(signature: signature, reason: "aggregate stalled")
+            return false
+        }
+
+        if outputFormatDrifted() {
+            state.outputFormatDriftSamples += 1
+        } else {
+            state.outputFormatDriftSamples = 0
+        }
+        if state.outputFormatDriftSamples >= 2 {
+            bamLog("router health failed: output format/sample-rate changed; rebuilding aggregate", level: .error)
+            recoverRouterAfterHealthFailure(signature: signature, reason: "output format drift")
+            return false
+        }
+
+        let driftedSourceIDs = sourceFormatDriftedIDs(sourceHealth)
+        for sourceID in driftedSourceIDs {
+            state.sourceFormatDriftSamples[sourceID, default: 0] += 1
+        }
+        for sourceID in Array(state.sourceFormatDriftSamples.keys) where !driftedSourceIDs.contains(sourceID) {
+            state.sourceFormatDriftSamples[sourceID] = 0
+        }
+        let formatBad = state.sourceFormatDriftSamples
+            .filter { $0.value >= 2 }
+            .map(\.key)
+        if !formatBad.isEmpty {
+            bamLog("router health failed: tap format changed for \(formatBad.sorted().joined(separator: ",")); rebuilding tap(s)", level: .error)
+            recoverRouterAfterHealthFailure(signature: signature, reason: "tap format drift", resetSourceIDs: Set(formatBad))
+            return false
+        }
+
+        var sourceFrameBad: [String] = []
+        var expectedSilentBad: [String] = []
+        var activeInputWithGain = false
+        for sourceID in expectedSourceIDs {
+            guard let s = sourceHealthByID[sourceID] else { continue }
+            let previousFrames = state.lastSourceFrames[sourceID]
+            state.lastSourceFrames[sourceID] = s.inputFrames
+
+            if let previousFrames, s.inputFrames <= previousFrames {
+                state.sourceStaleSamples[sourceID, default: 0] += 1
+            } else {
+                state.sourceStaleSamples[sourceID] = 0
+            }
+            if state.sourceStaleSamples[sourceID, default: 0] >= 3 {
+                sourceFrameBad.append(sourceID)
+            }
+
+            if s.meter <= Self.healthSilenceDB {
+                state.expectedSilentSamples[sourceID, default: 0] += 1
+            } else {
+                state.expectedSilentSamples[sourceID] = 0
+                activeInputWithGain = true
+            }
+            if state.expectedSilentSamples[sourceID, default: 0] >= 5 {
+                expectedSilentBad.append(sourceID)
+            }
+        }
+
+        if !sourceFrameBad.isEmpty {
+            bamLog("router health failed: source tap stopped advancing for \(sourceFrameBad.sorted().joined(separator: ",")); rebuilding tap(s)", level: .error)
+            recoverRouterAfterHealthFailure(signature: signature, reason: "source tap stalled", resetSourceIDs: Set(sourceFrameBad))
+            return false
+        }
+
+        if !expectedSilentBad.isEmpty {
+            bamLog("router health failed: expected source audio missing for \(expectedSilentBad.sorted().joined(separator: ",")); rebuilding tap(s)", level: .error)
+            recoverRouterAfterHealthFailure(signature: signature, reason: "expected source silent", resetSourceIDs: Set(expectedSilentBad))
+            return false
+        }
+
+        if activeInputWithGain && h.outputPeak <= Self.healthOutputSilencePeak {
+            state.renderSilentSamples += 1
+        } else {
+            state.renderSilentSamples = 0
+        }
+        if state.renderSilentSamples >= 3 {
+            bamLog("router health failed: active input but silent render peak=\(h.outputPeak); rebuilding aggregate", level: .error)
+            recoverRouterAfterHealthFailure(signature: signature, reason: "silent render")
+            return false
+        }
+
+        return true
+    }
+
+    private func outputFormatDrifted() -> Bool {
+        guard let baseline = routerHealthBaseline,
+              let expected = baseline.outputSampleRate,
+              let current = Self.deviceSampleRate(uid: baseline.outputUID)
+        else { return false }
+        return abs(current - expected) > 1
+    }
+
+    private func sourceFormatDriftedIDs(_ sources: [RouterAggregate.SourceHealthSnapshot]) -> Set<String> {
+        guard let baseline = routerHealthBaseline else { return [] }
+        return Set(sources.compactMap { source in
+            guard let expected = baseline.sourceFormats[source.sourceID] else { return nil }
+            let sampleRateChanged = abs(source.sampleRate - expected.sampleRate) > 1
+            let channelsChanged = source.channels != expected.channels
+            return sampleRateChanged || channelsChanged ? source.sourceID : nil
+        })
+    }
+
+    private func expectedAudibleSourceIDs(
+        config: BamConfig,
+        processes: [AudioProcessInfo]
+    ) -> Set<String> {
+        let groupedTargets = config.sources
+            .filter { $0.kind == .app }
+            .flatMap(\.bundleIDs)
+
+        var expected = Set<String>()
+        for source in config.sources where effectiveSourceGain(config: config, sourceID: source.id) > Self.healthGainFloor {
+            switch source.kind {
+            case .app:
+                if processes.contains(where: { proc in
+                    proc.isRunningOutput && Self.matchedTarget(proc.bundleID, source.bundleIDs) != nil
+                }) {
+                    expected.insert(source.id)
+                }
+            case .rest:
+                let selfBundle = Bundle.main.bundleIdentifier
+                if processes.contains(where: { proc in
+                    proc.isRunningOutput
+                        && proc.bundleID != selfBundle
+                        && Self.matchedTarget(proc.bundleID, groupedTargets) == nil
+                }) {
+                    expected.insert(source.id)
+                }
+            }
+        }
+        return expected
+    }
+
+    private func effectiveSourceGain(config: BamConfig, sourceID: String) -> Double {
+        guard !config.masterMuted else { return 0 }
+        if let solo = config.solo, solo != sourceID { return 0 }
+        var gain = 0.0
+        for mix in config.mixes {
+            guard let send = mix.sends.first(where: { $0.source == sourceID }), !send.muted else {
+                continue
+            }
+            gain += config.master * mix.level * send.level
+        }
+        return gain
+    }
+
+    private func recoverRouterAfterHealthFailure(
+        signature: String,
+        reason: String,
+        resetSourceIDs: Set<String> = []
+    ) {
+        guard routerTapSig == signature, let config = routerConfig else { return }
+        let event = routerRecoveryPolicy.recordAttempt(reason: reason)
+        emitRouterRecoveryEvent(event)
+        routerHealthTask?.cancel()
+        routerHealthTask = nil
+        guard case .attempting = event else {
+            router = nil
+            routerTapSig = nil
+            routerHealthBaseline = nil
+            return
+        }
+        for sourceID in resetSourceIDs {
+            liveTaps[sourceID] = nil
+        }
+        router = nil
+        routerTapSig = nil
+        routerHealthBaseline = nil
+        bamLog("router recovery: \(reason)")
+        _ = startRouter(config: config)
     }
 
     // MARK: router recovery events
 
-    private var routerEventListeners: [ChangeListener] = []
+    private var routerEventListeners: [UUID: [any ChangeListenerToken]] = [:]
+    private var routerRecoveryEventSinks: [UUID: AsyncStream<RouterRecoveryEvent>.Continuation] = [:]
 
     /// Emits whenever the audio process list or output-device list changes — the
     /// only moments a previously failed `startRouter` could newly succeed (an app
     /// started, or an output device appeared). The view model retries on each
     /// event, so recovery is event-driven rather than a blind poll.
     public func routerEvents() -> AsyncStream<Void> {
-        AsyncStream { continuation in
-            let procL = ChangeListener(
-                object: AudioObjectID(kAudioObjectSystemObject),
-                selector: kAudioHardwarePropertyProcessObjectList
-            ) { continuation.yield(()) }
-            let devL = ChangeListener(
-                object: AudioObjectID(kAudioObjectSystemObject),
-                selector: kAudioHardwarePropertyDevices
-            ) { continuation.yield(()) }
-            // Default-output switches (between two devices that both stay present)
-            // change no device LIST, so without this the router never re-resolves
-            // its fallback target and keeps routing to the old device.
-            let defL = ChangeListener(
-                object: AudioObjectID(kAudioObjectSystemObject),
-                selector: kAudioHardwarePropertyDefaultOutputDevice
-            ) { continuation.yield(()) }
-            // Held by the actor so they outlive this closure; freed on deinit.
-            routerEventListeners.append(contentsOf: [procL, devL, defL])
+        let id = UUID()
+        return AsyncStream { continuation in
+            self.addRouterEventListeners(id: id, continuation: continuation)
+            continuation.onTermination = { _ in
+                Task { await self.removeRouterEventListeners(id: id) }
+            }
         }
     }
 
-    /// Equal-power pan law. 0 = hard left, 0.5 = center, 1 = hard right.
-    private static func equalPower(pan: Float) -> (Float, Float) {
-        let p = min(max(pan, 0), 1)
-        let theta = p * (Float.pi / 2)
-        return (cos(theta), sin(theta))
+    private func addRouterEventListeners(
+        id: UUID,
+        continuation: AsyncStream<Void>.Continuation
+    ) {
+        routerEventListeners[id] = [
+            Self.changeListenerFactoryStore.make(
+                object: AudioObjectID(kAudioObjectSystemObject),
+                selector: kAudioHardwarePropertyProcessObjectList
+            ) { continuation.yield(()) },
+            Self.changeListenerFactoryStore.make(
+                object: AudioObjectID(kAudioObjectSystemObject),
+                selector: kAudioHardwarePropertyDevices
+            ) { continuation.yield(()) },
+            // Default-output switches (between two devices that both stay present)
+            // change no device LIST, so without this the router never re-resolves
+            // its fallback target and keeps routing to the old device.
+            Self.changeListenerFactoryStore.make(
+                object: AudioObjectID(kAudioObjectSystemObject),
+                selector: kAudioHardwarePropertyDefaultOutputDevice
+            ) { continuation.yield(()) },
+        ]
+    }
+
+    private func removeRouterEventListeners(id: UUID) {
+        routerEventListeners[id] = nil
+    }
+
+    public func routerRecoveryEvents() -> AsyncStream<RouterRecoveryEvent> {
+        let id = UUID()
+        return AsyncStream { continuation in
+            Task { self.addRouterRecoveryEventSink(id: id, continuation: continuation) }
+            continuation.onTermination = { _ in
+                Task { await self.removeRouterRecoveryEventSink(id: id) }
+            }
+        }
+    }
+
+    public func resetRouterRecovery() {
+        routerRecoveryPolicy.reset()
+        emitRouterRecoveryEvent(.recovered)
+    }
+
+    private func addRouterRecoveryEventSink(
+        id: UUID,
+        continuation: AsyncStream<RouterRecoveryEvent>.Continuation
+    ) {
+        routerRecoveryEventSinks[id] = continuation
+    }
+
+    private func removeRouterRecoveryEventSink(id: UUID) {
+        routerRecoveryEventSinks[id] = nil
+    }
+
+    private func emitRouterRecoveryEvent(_ event: RouterRecoveryEvent) {
+        for sink in routerRecoveryEventSinks.values {
+            sink.yield(event)
+        }
     }
 
     /// Fold each source's level · mute · solo-gate · device level · master · pan
@@ -410,7 +709,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
                 guard let send = mix.sends.first(where: { $0.source == source.id }) else { continue }
                 let gated = (send.muted || (solo != nil && solo != source.id))
                     ? 0 : Float(mix.level * send.level) * master
-                let (pl, pr) = Self.equalPower(pan: Float(config.pans[source.id] ?? 0.5))
+                let (pl, pr) = AudioBalance.gains(pan: Float(config.pans[source.id] ?? 0.5))
                 l += gated * pl
                 r += gated * pr
             }
@@ -436,21 +735,30 @@ public actor CoreAudioEngine: AudioEngineProtocol {
 
     private func routerSnapshot() -> RouterSnapshot {
         guard let cfg = routerConfig else { return .silent }
-        let sources = cfg.sources.map { s in
-            RouterSourceMeter(
+        var sourceMeters: [String: (level: Float, left: Float, right: Float)] = [:]
+        let sources = cfg.sources.map { s -> RouterSourceMeter in
+            let level = router?.meter(sourceID: s.id) ?? RMSMeter.floorDB
+            let stereo = router?.stereoMeter(sourceID: s.id)
+                ?? (left: RMSMeter.floorDB, right: RMSMeter.floorDB)
+            sourceMeters[s.id] = (level, stereo.left, stereo.right)
+            return RouterSourceMeter(
                 id: s.id, name: s.name,
-                level: router?.meter(sourceID: s.id) ?? RMSMeter.floorDB
+                level: level, levelLeft: stereo.left, levelRight: stereo.right
             )
         }
         let mixes = cfg.mixes.map { m -> MixMeter in
             // A device's level mirrors the source it groups (one source per mix).
             let lvl: Float
-            if let sid = m.sends.first?.source, let r = router {
-                lvl = r.meter(sourceID: sid)
+            let stereo: (left: Float, right: Float)
+            if let sid = m.sends.first?.source, let cached = sourceMeters[sid] {
+                lvl = cached.level
+                stereo = (cached.left, cached.right)
             } else {
                 lvl = RMSMeter.floorDB
+                stereo = (RMSMeter.floorDB, RMSMeter.floorDB)
             }
-            return MixMeter(id: m.id, name: m.name, level: lvl)
+            return MixMeter(id: m.id, name: m.name, level: lvl,
+                            levelLeft: stereo.left, levelRight: stereo.right)
         }
         return RouterSnapshot(sources: sources, mixes: mixes)
     }
@@ -463,120 +771,14 @@ public actor CoreAudioEngine: AudioEngineProtocol {
     }
 
     public func stopRouter() {
+        routerHealthTask?.cancel()
+        routerHealthTask = nil
         routerSamplerTask?.cancel()
         routerSamplerTask = nil
         router = nil          // deinit tears down the aggregate → un-mutes apps
         routerConfig = nil
-    }
-
-    private func rebuild() {
-        bamLog("REBUILD enforce=\(enforce) groups=\(groups.filter { !$0.bundleIDs.isEmpty }.map(\.name))")
-        outputDeviceList = ProcessEnumerator.systemOutputDevices()
-        var newChainByKey: [String: TapChain] = [:]
-        var newEntriesByGroup: [String: [SourceEntry]] = [:]
-        var groupedProcessIDs = Set<AudioObjectID>()
-
-        let allProcs = ProcessEnumerator.allProcesses()
-        let outUID = enforce ? (outputDeviceUID ?? ProcessEnumerator.defaultOutputDeviceUID()) : nil
-        let outName = outUID.flatMap { uid in outputDeviceList.first { $0.uid == uid }?.name } ?? "all output"
-
-        for group in groups where !group.bundleIDs.isEmpty {
-            var entries: [SourceEntry] = []
-            for target in group.bundleIDs {
-                let procIDs = allProcs
-                    .filter { Self.matchedTarget($0.bundleID, [target]) != nil }
-                    .map(\.objectID)
-                guard !procIDs.isEmpty else { continue }
-                for id in procIDs { groupedProcessIDs.insert(id) }
-
-                let procKey = procIDs.sorted().map(String.init).joined(separator: ",")
-                let key = "\(enforce)|\(outUID ?? "")|\(group.name)|\(target)|\(procKey)"
-                let chain: TapChain
-                if let existing = chainByKey[key] {
-                    chain = existing
-                } else if let created = makeAppChain(procIDs: procIDs, outputUID: outUID) {
-                    bamLog("NEW CHAIN \(group.name)/\(target) procs=\(procKey) enforce=\(enforce)")
-                    chain = created
-                } else {
-                    continue
-                }
-                newChainByKey[key] = chain
-                entries.append(SourceEntry(
-                    key: key,
-                    bundleID: target,
-                    displayName: Self.displayName(target),
-                    deviceUID: outUID ?? "",
-                    deviceName: outName,
-                    chain: chain
-                ))
-            }
-            newEntriesByGroup[group.name] = entries
-        }
-
-        chainByKey = newChainByKey
-        entriesByGroup = newEntriesByGroup
-        rebuildRemainder(excluding: groupedProcessIDs)
-        pushGains()
-    }
-
-    private func pushGains() {
-        for group in groups {
-            let g = group.muted ? 0 : Float(master * group.volume)
-            for entry in entriesByGroup[group.name] ?? [] {
-                entry.chain.setGain(g)
-            }
-        }
-    }
-
-    private func rebuildRemainder(excluding: Set<AudioObjectID>) {
-        allAudioChain = TapChain(
-            description: CATapDescription(stereoGlobalTapButExcludeProcesses: Array(excluding))
-        )
-    }
-
-    private func makeAppChain(procIDs: [AudioObjectID], outputUID: String?) -> TapChain? {
-        let desc = CATapDescription(stereoMixdownOfProcesses: procIDs)
-        return TapChain(description: desc, outputDeviceUID: outputUID)
-    }
-
-    private func snapshot() -> MeterSnapshot {
-        let master = masterChain?.slot.load() ?? RMSMeter.floorDB
-        let claimingGroup = groups.contains(where: \.includesUnassigned)
-
-        let groupMeters: [GroupMeter] = groups.map { group in
-            let entries = entriesByGroup[group.name] ?? []
-            var levels = entries.map { $0.chain.slot.load() }
-            if group.includesUnassigned, let remainder = allAudioChain?.slot.load() {
-                levels.append(remainder)
-            }
-            let sources = entries.map {
-                SourceMeter(
-                    bundleID: $0.bundleID,
-                    displayName: $0.displayName,
-                    deviceUID: $0.deviceUID,
-                    deviceName: $0.deviceName,
-                    level: $0.chain.slot.load()
-                )
-            }
-            return GroupMeter(
-                name: group.name,
-                volume: group.volume,
-                muted: group.muted,
-                level: RMSMeter.combine(levels),
-                sources: sources,
-                isUnassignedBucket: group.includesUnassigned
-            )
-        }
-
-        let unassigned: GroupMeter? = claimingGroup ? nil : GroupMeter(
-            name: "All Audio",
-            volume: 1.0,
-            muted: false,
-            level: allAudioChain?.slot.load() ?? RMSMeter.floorDB,
-            sources: [],
-            isUnassignedBucket: true
-        )
-        return MeterSnapshot(master: master, groups: groupMeters, unassigned: unassigned)
+        routerTapSig = nil
+        routerHealthBaseline = nil
     }
 
     private static func displayName(_ bundleID: String) -> String {

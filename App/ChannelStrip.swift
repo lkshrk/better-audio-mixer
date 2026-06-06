@@ -2,19 +2,29 @@ import BamCore
 import SwiftUI
 
 /// Global master strip pinned at the right: one fader scaling every mix's output
-/// (folds into each MixSpec.master in the engine), with an aggregate meter.
+/// (folds into each mix level in the engine), with an aggregate meter.
 struct MasterStrip: View {
     @Environment(\.theme) private var t
     @Bindable var model: ConsoleViewModel
 
     @State private var level: Double = 1.0
     @State private var pickingOutput = false
+    @State private var showingRecoveryStatus = false
 
     var body: some View {
         VStack(spacing: 0) {
             outputSelector
                 .frame(maxWidth: .infinity)
                 .padding(.init(top: 6, leading: 2, bottom: 8, trailing: 2))
+
+            if model.audioRecoveryDisplayState.isVisible {
+                AudioRecoveryPill(
+                    state: model.audioRecoveryDisplayState,
+                    isPresented: $showingRecoveryStatus,
+                    onRestart: { Task { await model.restartAudio() } }
+                )
+                .padding(.bottom, 8)
+            }
 
             GeometryReader { geo in
                 let h = max(80, geo.size.height)
@@ -96,6 +106,121 @@ struct MasterStrip: View {
         .popover(isPresented: $pickingOutput, arrowEdge: .bottom) {
             OutputList(model: model).environment(\.theme, t)
         }
+    }
+}
+
+struct AudioRecoveryPill: View {
+    @Environment(\.theme) private var t
+    let state: AudioRecoveryDisplayState
+    @Binding var isPresented: Bool
+    let onRestart: () -> Void
+
+    private var tone: Color {
+        switch state {
+        case .ok: t.accent
+        case .recovering: Color(hex: "f2b84b")
+        case .paused: Color(hex: "ff5b5b")
+        }
+    }
+
+    var body: some View {
+        Group {
+            if state.isActionable {
+                Button { isPresented.toggle() } label: {
+                    content
+                }
+                .buttonStyle(.plain)
+                .focusEffectDisabled()
+                .popover(isPresented: $isPresented, arrowEdge: .trailing) {
+                    AudioRecoveryStatusPopover(
+                        state: state,
+                        tone: tone,
+                        onRestart: {
+                            isPresented = false
+                            onRestart()
+                        }
+                    )
+                        .environment(\.theme, t)
+                }
+            } else {
+                content
+            }
+        }
+        .help(state.detail)
+    }
+
+    private var content: some View {
+        HStack(spacing: 5) {
+            Image(systemName: state.icon)
+                .font(.system(size: 10, weight: .bold))
+            Text(state.title)
+                .font(.system(size: 10.5, weight: .semibold))
+                .lineLimit(1)
+        }
+        .foregroundStyle(tone)
+        .frame(maxWidth: .infinity)
+        .frame(height: 24)
+        .background(RoundedRectangle(cornerRadius: 8).fill(tone.opacity(0.15)))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(tone.opacity(0.32), lineWidth: 0.5))
+        .contentShape(Rectangle())
+    }
+}
+
+private struct AudioRecoveryStatusPopover: View {
+    @Environment(\.theme) private var t
+    let state: AudioRecoveryDisplayState
+    let tone: Color
+    let onRestart: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 9) {
+                Image(systemName: state.icon)
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(tone)
+                    .frame(width: 24, height: 24)
+                    .background(Circle().fill(tone.opacity(0.15)))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(state.explanationTitle)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(t.text)
+                    Text(state.explanation)
+                        .font(.system(size: 11))
+                        .foregroundStyle(t.dim)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            VStack(spacing: 6) {
+                statusRow("Reason", state.reason)
+                statusRow("Attempts", state.attempts)
+            }
+
+            HStack(spacing: 8) {
+                Spacer()
+                Button("Restart Audio", action: onRestart)
+            }
+        }
+        .padding(12)
+        .frame(width: 268)
+        .background(t.surface2)
+        .focusEffectDisabled()
+    }
+
+    private func statusRow(_ label: String, _ value: String) -> some View {
+        HStack(spacing: 8) {
+            Text(label.uppercased())
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundStyle(t.faint)
+                .frame(width: 66, alignment: .leading)
+            Text(value)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(t.text)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 0)
+        }
+        .frame(height: 24)
     }
 }
 

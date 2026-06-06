@@ -364,26 +364,11 @@ static UInt32       gBAM_Channels[kBAM_MaxDevices];
 // Plugin-scope mix config: CFPropertyListRef (CFDictionaryRef), written by controller app.
 static CFPropertyListRef gBAM_MixConfig = NULL;
 
-// Scalar aliases for slot 0 so legacy single-device code paths compile unchanged.
-// These are just syntactic shortcuts; all real logic uses gBAM_* arrays.
+// Slot-0 shortcuts retained for the remaining scalar initialization/readback paths.
 #define gDevice_SampleRate              gBAM_SampleRate[0]
-#define gDevice_RequestedSampleRate     gBAM_RequestedSampleRate[0]
-#define gDevice_IOIsRunning             gBAM_IOIsRunning[0]
-#define gDevice2_IOIsRunning            gBAM_IOIsRunning[1]
-#define gRingBuffer                     gBAM_RingBuffer[0]
 #define gDevice_HostTicksPerFrame       gBAM_HostTicksPerFrame[0]
 #define gDevice_AdjustedTicksPerFrame   gBAM_AdjustedTicksPerFrame[0]
-#define gDevice_PreviousTicks           gBAM_PreviousTicks[0]
-#define gDevice_NumberTimeStamps        gBAM_NumberTimeStamps[0]
-#define gDevice_AnchorSampleTime        gBAM_AnchorSampleTime[0]
-#define gDevice_AnchorHostTime          gBAM_AnchorHostTime[0]
-#define gStream_Input_IsActive          gBAM_StreamInputActive[0]
-#define gStream_Output_IsActive         gBAM_StreamOutputActive[0]
-#define gVolume_Master_Value            gBAM_Volume[0]
-#define gMute_Master_Value              gBAM_Mute[0]
 #define gPitch_Adjust                   gBAM_PitchAdjust[0]
-#define gPitch_Adjust_Enabled           gBAM_PitchEnabled[0]
-#define gClockSource_Value              gBAM_ClockSource[0]
 
 static const Float32                kVolume_MinDB                       = -64.0;
 static const Float32                kVolume_MaxDB                       = 0.0;
@@ -606,22 +591,20 @@ static AudioServerPlugInDriverInterface*    gAudioServerPlugInDriverInterfacePtr
 static AudioServerPlugInDriverRef            gAudioServerPlugInDriverRef                = &gAudioServerPlugInDriverInterfacePtr;
 
 
-#define RETURN_FORMATTED_STRING(_string_fmt)                          \
-if(kHas_Driver_Name_Format)                                           \
-{                                                                     \
-	return CFStringCreateWithFormat(NULL, NULL, CFSTR(_string_fmt), kNumber_Of_Channels); \
-}                                                                     \
-else                                                                  \
-{                                                                     \
-	return CFStringCreateWithCString(NULL, _string_fmt, kCFStringEncodingUTF8); \
-}
+#if kHas_Driver_Name_Format
+#define RETURN_DRIVER_STRING(_string_fmt) \
+	return CFStringCreateWithFormat(NULL, NULL, CFSTR(_string_fmt), kNumber_Of_Channels)
+#else
+#define RETURN_DRIVER_STRING(_string_fmt) \
+	return CFStringCreateWithCString(NULL, _string_fmt, kCFStringEncodingUTF8)
+#endif
 
-static CFStringRef get_box_uid(void)          { RETURN_FORMATTED_STRING(kBox_UID) }
-static CFStringRef get_device_uid(void)       { RETURN_FORMATTED_STRING(kDevice_UID) }
-static CFStringRef get_device_name(void)      { RETURN_FORMATTED_STRING(kDevice_Name) }
-static CFStringRef get_device2_uid(void)      { RETURN_FORMATTED_STRING(kDevice2_UID) }
-static CFStringRef get_device2_name(void)     { RETURN_FORMATTED_STRING(kDevice2_Name) }
-static CFStringRef get_device_model_uid(void) { RETURN_FORMATTED_STRING(kDevice_ModelUID) }
+static CFStringRef get_box_uid(void)          { RETURN_DRIVER_STRING(kBox_UID); }
+static CFStringRef get_device_uid(void)       { RETURN_DRIVER_STRING(kDevice_UID); }
+static CFStringRef get_device_name(void)      { RETURN_DRIVER_STRING(kDevice_Name); }
+static CFStringRef get_device2_uid(void)      { RETURN_DRIVER_STRING(kDevice2_UID); }
+static CFStringRef get_device2_name(void)     { RETURN_DRIVER_STRING(kDevice2_Name); }
+static CFStringRef get_device_model_uid(void) { RETURN_DRIVER_STRING(kDevice_ModelUID); }
 
 // Volume conversions
 
@@ -1460,18 +1443,7 @@ static OSStatus	BlackHole_GetPlugInPropertyData(AudioServerPlugInDriverRef inDri
 
 			if(CFStringCompare(*((CFStringRef*)inQualifierData), boxUID, 0) == kCFCompareEqualTo)
 			{
-				CFStringRef formattedString = CFStringCreateWithFormat(NULL, NULL, CFSTR(kBox_UID), kNumber_Of_Channels);
-				if(CFStringCompare(*((CFStringRef*)inQualifierData), formattedString, 0) == kCFCompareEqualTo)
-				{
-					*((AudioObjectID*)outData) = kObjectID_Box;
-				}
-				else
-				{
-					*((AudioObjectID*)outData) = kAudioObjectUnknown;
-				}
 				*outDataSize = sizeof(AudioObjectID);
-				CFRelease(formattedString);
-
 				*((AudioObjectID*)outData) = kObjectID_Box;
 			}
 			else

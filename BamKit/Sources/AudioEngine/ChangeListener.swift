@@ -1,10 +1,24 @@
 import CoreAudio
 import Foundation
 
+protocol ChangeListenerToken: AnyObject, Sendable {}
+
+final class AnyChangeListenerToken: ChangeListenerToken, @unchecked Sendable {
+    private let onDeinit: @Sendable () -> Void
+
+    init(_ onDeinit: @escaping @Sendable () -> Void) {
+        self.onDeinit = onDeinit
+    }
+
+    deinit {
+        onDeinit()
+    }
+}
+
 /// Registers a Core Audio property listener and invokes `onChange` whenever the
 /// property fires. Used to watch the process list so the engine rebuilds chains
 /// when apps start or stop producing audio.
-final class ChangeListener {
+final class ChangeListener: ChangeListenerToken, @unchecked Sendable {
     private let object: AudioObjectID
     private var address: AudioObjectPropertyAddress
     private let queue = DispatchQueue(label: "bam.change-listener")

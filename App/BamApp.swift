@@ -2,6 +2,48 @@ import AppKit
 import ServiceManagement
 import SwiftUI
 
+struct RunningApplicationIdentity: Equatable {
+    let bundleIdentifier: String?
+    let processIdentifier: pid_t
+}
+
+enum SingleInstanceGuard {
+    static let appBundleIdentifiers: Set<String> = [
+        "me.harke.bam",
+        "me.harke.bam.dev"
+    ]
+
+    static func hasOtherInstance(
+        bundleIdentifier: String?,
+        currentPID: pid_t,
+        runningApplications: [RunningApplicationIdentity]
+    ) -> Bool {
+        guard let bundleIdentifier, !bundleIdentifier.isEmpty else { return false }
+        let guardedBundleIdentifiers = appBundleIdentifiers.union([bundleIdentifier])
+        return runningApplications.contains {
+            guard let runningBundleIdentifier = $0.bundleIdentifier else { return false }
+            return guardedBundleIdentifiers.contains(runningBundleIdentifier)
+                && $0.processIdentifier != currentPID
+        }
+    }
+
+    static func shouldTerminateCurrentProcess() -> Bool {
+        let runningApplications = appBundleIdentifiers
+            .flatMap(NSRunningApplication.runningApplications(withBundleIdentifier:))
+            .map {
+                RunningApplicationIdentity(
+                    bundleIdentifier: $0.bundleIdentifier,
+                    processIdentifier: $0.processIdentifier
+                )
+            }
+        return hasOtherInstance(
+            bundleIdentifier: Bundle.main.bundleIdentifier,
+            currentPID: getpid(),
+            runningApplications: runningApplications
+        )
+    }
+}
+
 /// Owns the window, the menu-bar status item, and the view model. The app is an
 /// LSUIElement agent (no dock icon); the status item is the only way in:
 /// left-click opens the window, right-click shows the controls menu.
@@ -12,16 +54,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if Self.isRunningUnderXCTest {
+            return
+        }
+
+        if SingleInstanceGuard.shouldTerminateCurrentProcess() {
+            NSApp.terminate(nil)
+            return
+        }
+
         buildWindow()
         buildStatusItem()
-        // Under XCTest the app is only a test host; don't spin up the real
-        // CoreAudio engine (taps, permission popup, device writes).
-        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
-        else { return }
         // Launch silent to the menu bar (agent app). The window opens on the
         // status-item click — by then start() has loaded the saved config, so
         // there's no empty "no devices yet" flash.
         Task { await model.start() }
+    }
+
+    private static var isRunningUnderXCTest: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
     }
 
     func applicationWillTerminate(_ notification: Notification) {

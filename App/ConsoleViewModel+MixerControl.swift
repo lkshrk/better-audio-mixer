@@ -18,7 +18,9 @@ extension ConsoleViewModel: MixerControl {
                 pos: pos,
                 pct: Int((pos * 100).rounded()),
                 muted: deviceMuted(mix.id),
-                level: mixLevel(mix.id)
+                level: mixLevel(mix.id),
+                levelLeft: mixLevelLeft(mix.id),
+                levelRight: mixLevelRight(mix.id)
             )
         }
         let master = MasterSnapshot(
@@ -26,6 +28,8 @@ extension ConsoleViewModel: MixerControl {
             pct: Int((outputVolume * 100).rounded()),
             muted: masterMuted,
             level: masterMeter,
+            levelLeft: masterMeterLeft,
+            levelRight: masterMeterRight,
             icon: systemOutputIcon
         )
         return ControlSnapshot(mixes: mixes, master: master)

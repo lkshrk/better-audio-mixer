@@ -2,8 +2,7 @@ import Foundation
 
 /// A routable input: a group of ≥1 app (by bundle id), or the singleton
 /// "Everything Else" remainder. Identity is canonical at top level; mixes
-/// reference a source by stable `id` (rename-safe). Replaces v1 `Group` for the
-/// v3 router; `Group` is kept only for the legacy v1/v2 UI.
+/// reference a source by stable `id` (rename-safe).
 public struct Source: Sendable, Equatable, Codable, Identifiable {
     public enum Kind: String, Sendable, Codable {
         case app        // one or more app bundle ids

@@ -1,11 +1,26 @@
 import BamCore
 import Foundation
+import os
 
 // MARK: - Wire protocol version
 
 private let kProtocolVersion = 1
 private let kAppName = "BAM"
 private let kBuildVersion = "1.0.0"
+
+private enum ControlLog {
+    static let logger = Logger(subsystem: "me.harke.bam", category: "control")
+}
+
+public struct ControlServerDiagnostics: Sendable, Equatable {
+    public var isListening: Bool
+    public var activeClients: Int
+    public var acceptedClients: Int
+    public var removedClients: Int
+    public var malformedFrames: Int
+    public var versionRejects: Int
+    public var sendFailures: Int
+}
 
 // MARK: - NDJSON framing helpers
 
@@ -55,6 +70,7 @@ final class Client: Hashable, @unchecked Sendable {
     var needsInitialState = false
     var clientName: String?
     var readBuffer = Data()
+    var recvBuffer = [UInt8](repeating: 0, count: 4096)
 
     init(fd: Int32) { self.fd = fd }
 
@@ -131,9 +147,23 @@ public final class ControlServer: @unchecked Sendable {
     }
 
     /// Push a new snapshot. Call this from @MainActor whenever the model changes
-    /// (and on a ~12fps timer from the app). The server broadcasts it to clients.
+    /// (and on the app's ~30fps router meter sampler). The server broadcasts it to clients.
     public func pushSnapshot(_ snap: ControlSnapshot) {
         snapshotCell.push(snap)
+    }
+
+    public func diagnosticsSnapshot() -> ControlServerDiagnostics {
+        bgQueue.sync {
+            ControlServerDiagnostics(
+                isListening: serverFD >= 0,
+                activeClients: clients.count,
+                acceptedClients: acceptedClients,
+                removedClients: removedClients,
+                malformedFrames: malformedFrames,
+                versionRejects: versionRejects,
+                sendFailures: sendFailures
+            )
+        }
     }
 
     // MARK: - Internal state (bgQueue only, except snapshotCell)
@@ -146,6 +176,11 @@ public final class ControlServer: @unchecked Sendable {
     private var acceptSource: DispatchSourceRead?
     private var readSources: [Int32: DispatchSourceRead] = [:]
     private var lastSnapshot: ControlSnapshot? = nil
+    private var acceptedClients = 0
+    private var removedClients = 0
+    private var malformedFrames = 0
+    private var versionRejects = 0
+    private var sendFailures = 0
 
     // MARK: - Socket path
 
@@ -161,13 +196,19 @@ public final class ControlServer: @unchecked Sendable {
     // MARK: - Listen
 
     private func listen() {
-        guard serverFD == -1 else { return }
+        guard serverFD == -1 else {
+            ControlLog.logger.debug("listen ignored; already running")
+            return
+        }
 
         let sockPath = resolvedSocketPath
         unlink(sockPath)
 
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else { return }
+        guard fd >= 0 else {
+            ControlLog.logger.error("socket failed errno=\(errno, privacy: .public)")
+            return
+        }
 
         let oldMask = umask(0o177)
         var addr = sockaddr_un()
@@ -188,8 +229,16 @@ public final class ControlServer: @unchecked Sendable {
         }
         umask(oldMask)
 
-        guard bindResult == 0 else { Darwin.close(fd); return }
-        guard Darwin.listen(fd, 8) == 0 else { Darwin.close(fd); return }
+        guard bindResult == 0 else {
+            ControlLog.logger.error("bind failed errno=\(errno, privacy: .public) path=\(sockPath, privacy: .private)")
+            Darwin.close(fd)
+            return
+        }
+        guard Darwin.listen(fd, 8) == 0 else {
+            ControlLog.logger.error("listen failed errno=\(errno, privacy: .public) path=\(sockPath, privacy: .private)")
+            Darwin.close(fd)
+            return
+        }
 
         serverFD = fd
 
@@ -200,25 +249,31 @@ public final class ControlServer: @unchecked Sendable {
         acceptSource = src
 
         startMeterTimer()
+        ControlLog.logger.notice("listening path=\(sockPath, privacy: .private)")
     }
 
     private func stopListening() {
+        ControlLog.logger.notice("stopping clients=\(self.clients.count, privacy: .public)")
         timerSource?.cancel(); timerSource = nil
         acceptSource?.cancel(); acceptSource = nil
         serverFD = -1
-        let snapshot = clients; clients = []
-        for c in snapshot { c.close() }
-        readSources.values.forEach { $0.cancel() }
+        clients = []
+        let sources = readSources
         readSources = [:]
+        sources.values.forEach { $0.cancel() }
     }
 
     // MARK: - Accept
 
     private func acceptClient() {
         let clientFD = Darwin.accept(serverFD, nil, nil)
-        guard clientFD >= 0 else { return }
+        guard clientFD >= 0 else {
+            ControlLog.logger.warning("accept failed errno=\(errno, privacy: .public)")
+            return
+        }
         let client = Client(fd: clientFD)
         clients.insert(client)
+        acceptedClients += 1
         let src = DispatchSource.makeReadSource(fileDescriptor: clientFD, queue: bgQueue)
         src.setEventHandler { [weak self, weak client] in
             guard let self, let client else { return }
@@ -227,40 +282,57 @@ public final class ControlServer: @unchecked Sendable {
         src.setCancelHandler { Darwin.close(clientFD) }
         src.resume()
         readSources[clientFD] = src
+        ControlLog.logger.info("client accepted fd=\(clientFD, privacy: .public) clients=\(self.clients.count, privacy: .public)")
     }
 
     // MARK: - Read
 
     private func readData(from client: Client) {
-        var buf = [UInt8](repeating: 0, count: 4096)
-        let n = Darwin.recv(client.fd, &buf, buf.count, 0)
-        if n <= 0 { removeClient(client); return }
-        client.readBuffer.append(contentsOf: buf.prefix(n))
+        let n = client.recvBuffer.withUnsafeMutableBytes { buf in
+            Darwin.recv(client.fd, buf.baseAddress, buf.count, 0)
+        }
+        if n <= 0 {
+            if n < 0 {
+                ControlLog.logger.warning("client recv failed fd=\(client.fd, privacy: .public) errno=\(errno, privacy: .public)")
+            } else {
+                ControlLog.logger.info("client disconnected fd=\(client.fd, privacy: .public)")
+            }
+            removeClient(client)
+            return
+        }
+        client.readBuffer.append(client.recvBuffer, count: n)
         processLines(client: client)
     }
 
     private func processLines(client: Client) {
         while let idx = client.readBuffer.firstIndex(of: 0x0A) {
             let lineData = Data(client.readBuffer[client.readBuffer.startIndex ..< idx])
-            client.readBuffer = client.readBuffer[client.readBuffer.index(after: idx)...]
+            client.readBuffer.removeSubrange(client.readBuffer.startIndex ... idx)
             if lineData.isEmpty { continue }
             handleFrame(lineData, client: client)
         }
     }
 
     private func removeClient(_ client: Client) {
-        clients.remove(client)
+        if clients.remove(client) != nil {
+            removedClients += 1
+        }
         if let src = readSources.removeValue(forKey: client.fd) {
             src.cancel()
         } else {
             client.close()
         }
+        ControlLog.logger.info("client removed fd=\(client.fd, privacy: .public) clients=\(self.clients.count, privacy: .public)")
     }
 
     // MARK: - Frame dispatch
 
     private func handleFrame(_ data: Data, client: Client) {
-        guard let obj = try? decodeFrame(data), let t = obj["t"] as? String else { return }
+        guard let obj = try? decodeFrame(data), let t = obj["t"] as? String else {
+            malformedFrames += 1
+            ControlLog.logger.warning("dropping malformed frame fd=\(client.fd, privacy: .public) bytes=\(data.count, privacy: .public)")
+            return
+        }
         switch t {
         case "hello":   handleHello(obj, client: client)
         case "cmd":     guard client.handshakeDone else { return }; handleCmd(obj)
@@ -276,6 +348,8 @@ public final class ControlServer: @unchecked Sendable {
     private func handleHello(_ obj: [String: Any], client: Client) {
         let v = obj["v"] as? Int ?? 0
         guard v == kProtocolVersion else {
+            versionRejects += 1
+            ControlLog.logger.warning("client version rejected fd=\(client.fd, privacy: .public) version=\(v, privacy: .public)")
             _ = client.send(["t": "error", "code": "version"])
             removeClient(client)
             return
@@ -285,6 +359,7 @@ public final class ControlServer: @unchecked Sendable {
         client.needsInitialState = true
         _ = client.send(["t": "hello-ack", "v": kProtocolVersion,
                          "app": kAppName, "build": kBuildVersion])
+        ControlLog.logger.notice("client handshaked fd=\(client.fd, privacy: .public) name=\(client.clientName ?? "unknown", privacy: .private)")
         // Full state is sent on the next timer tick which reads snapshotCell directly.
     }
 
@@ -307,7 +382,8 @@ public final class ControlServer: @unchecked Sendable {
             case "setMasterPos":        guard let pos   else { return }; mixer.setMasterPos(pos: pos)
             case "nudgeMasterPos":      guard let delta else { return }; mixer.nudgeMasterPos(delta: delta)
             case "setMasterMuted":      guard let muted else { return }; mixer.setMasterMuted(muted: muted)
-            default: break
+            default:
+                ControlLog.logger.warning("unknown command op=\(op, privacy: .public)")
             }
         }
     }
@@ -358,18 +434,19 @@ public final class ControlServer: @unchecked Sendable {
                 if ok {
                     _ = client.send(["t": "outputs-ack", "uid": uid])
                 } else {
+                    ControlLog.logger.warning("unsupported output uid=\(uid, privacy: .private)")
                     _ = client.send(["t": "error", "code": "unsupported", "op": "setOutputDevice"])
                 }
             }
         }
     }
 
-    // MARK: - Meter timer (~12 fps) — reads snapshotCell directly, no actor hop
+    // MARK: - Meter timer (~30 fps) — reads snapshotCell directly, no actor hop
 
     private func startMeterTimer() {
         let timer = DispatchSource.makeTimerSource(queue: bgQueue)
-        timer.schedule(deadline: .now() + .milliseconds(83),
-                       repeating: .milliseconds(83), leeway: .milliseconds(10))
+        timer.schedule(deadline: .now() + .milliseconds(33),
+                       repeating: .milliseconds(33), leeway: .milliseconds(4))
         timer.setEventHandler { [weak self] in self?.tick() }
         timer.resume()
         timerSource = timer
@@ -387,12 +464,21 @@ public final class ControlServer: @unchecked Sendable {
     private func broadcastDiff(snap: ControlSnapshot, handshaked: [Client]) {
         let prev = lastSnapshot
 
-        // Meter frame — level-only, always sent (~12fps)
-        let meterMixes = snap.mixes.map { m -> [String: Any] in ["id": m.id, "level": Double(m.level)] }
+        // Meter frame — level-only, always sent (~30fps)
+        let meterMixes = snap.mixes.map { m -> [String: Any] in
+            ["id": m.id,
+             "level": Double(m.level),
+             "levelLeft": Double(m.levelLeft),
+             "levelRight": Double(m.levelRight)]
+        }
         let meterFrame: [String: Any] = [
             "t": "meter",
             "mixes": meterMixes,
-            "master": ["level": Double(snap.master.level)]
+            "master": [
+                "level": Double(snap.master.level),
+                "levelLeft": Double(snap.master.levelLeft),
+                "levelRight": Double(snap.master.levelRight)
+            ]
         ]
 
         // Delta frames — pos/mute changes only, event-driven
@@ -438,6 +524,10 @@ public final class ControlServer: @unchecked Sendable {
             for df in deltaFrames where alive { alive = client.send(df) }
             if !alive { dead.append(client) }
         }
+        if !dead.isEmpty {
+            sendFailures += dead.count
+            ControlLog.logger.warning("removing dead clients after send failures count=\(dead.count, privacy: .public)")
+        }
         for client in dead { removeClient(client) }
     }
 
@@ -446,10 +536,16 @@ public final class ControlServer: @unchecked Sendable {
     private func stateFrame(_ snap: ControlSnapshot) -> [String: Any] {
         let mixes = snap.mixes.map { m -> [String: Any] in
             ["id": m.id, "name": m.name, "emoji": m.emoji,
-             "pos": m.pos, "pct": m.pct, "muted": m.muted, "level": Double(m.level)]
+             "pos": m.pos, "pct": m.pct, "muted": m.muted,
+             "level": Double(m.level),
+             "levelLeft": Double(m.levelLeft),
+             "levelRight": Double(m.levelRight)]
         }
         let master: [String: Any] = ["pos": snap.master.pos, "pct": snap.master.pct,
-                                     "muted": snap.master.muted, "level": Double(snap.master.level),
+                                     "muted": snap.master.muted,
+                                     "level": Double(snap.master.level),
+                                     "levelLeft": Double(snap.master.levelLeft),
+                                     "levelRight": Double(snap.master.levelRight),
                                      "icon": snap.master.icon]
         return ["t": "state", "mixes": mixes, "master": master]
     }

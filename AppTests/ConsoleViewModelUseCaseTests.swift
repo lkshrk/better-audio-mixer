@@ -48,9 +48,83 @@ final class ConsoleViewModelUseCaseTests: XCTestCase {
         XCTAssertEqual(model.outputVolume, 1.0, accuracy: 0.0001)
     }
 
+    func testOutputPickerHidesBamInternalDevices() {
+        XCTAssertTrue(ConsoleViewModel.isSelectableHardwareOutput(
+            AudioDevice(uid: "AppleUSBAudioEngine:Display:2", name: "Studio Display")
+        ))
+        XCTAssertFalse(ConsoleViewModel.isSelectableHardwareOutput(
+            AudioDevice(uid: "BAM_UID_0", name: "bam Device 0")
+        ))
+        XCTAssertFalse(ConsoleViewModel.isSelectableHardwareOutput(
+            AudioDevice(uid: "bam-router-agg", name: "bam-router")
+        ))
+        XCTAssertFalse(ConsoleViewModel.isSelectableHardwareOutput(
+            AudioDevice(uid: "private-aggregate", name: "bam-router")
+        ))
+    }
+
+    func testSingleInstanceGuardDetectsSameBundleDifferentPID() {
+        XCTAssertTrue(SingleInstanceGuard.hasOtherInstance(
+            bundleIdentifier: "me.harke.bam",
+            currentPID: 100,
+            runningApplications: [
+                RunningApplicationIdentity(bundleIdentifier: "me.harke.bam", processIdentifier: 200)
+            ]
+        ))
+        XCTAssertFalse(SingleInstanceGuard.hasOtherInstance(
+            bundleIdentifier: "me.harke.bam",
+            currentPID: 100,
+            runningApplications: [
+                RunningApplicationIdentity(bundleIdentifier: "me.harke.bam", processIdentifier: 100),
+                RunningApplicationIdentity(bundleIdentifier: "com.apple.finder", processIdentifier: 200)
+            ]
+        ))
+    }
+
+    func testSingleInstanceGuardTreatsDevAndReleaseAsConflictingInstances() {
+        XCTAssertTrue(SingleInstanceGuard.hasOtherInstance(
+            bundleIdentifier: "me.harke.bam",
+            currentPID: 100,
+            runningApplications: [
+                RunningApplicationIdentity(bundleIdentifier: "me.harke.bam.dev", processIdentifier: 200)
+            ]
+        ))
+        XCTAssertTrue(SingleInstanceGuard.hasOtherInstance(
+            bundleIdentifier: "me.harke.bam.dev",
+            currentPID: 100,
+            runningApplications: [
+                RunningApplicationIdentity(bundleIdentifier: "me.harke.bam", processIdentifier: 200)
+            ]
+        ))
+    }
+
+    func testPaletteHueIsStableAcrossProcessesForKnownIDs() {
+        XCTAssertEqual(Palette.hue(for: "m-game"), 0.8194444444, accuracy: 0.0001)
+        XCTAssertEqual(Palette.hue(for: "m-chat"), 0.4305555556, accuracy: 0.0001)
+        XCTAssertEqual(Palette.hue(for: "Default"), 0.2555555556, accuracy: 0.0001)
+    }
+
+    func testAppIconCacheCachesMissingBundleLookups() {
+        var lookups: [String] = []
+        AppIconCache.resetForTests()
+        AppIconCache.resolveIconForTests = { bundleID in
+            lookups.append(bundleID)
+            return nil
+        }
+        defer {
+            AppIconCache.resolveIconForTests = nil
+            AppIconCache.resetForTests()
+        }
+
+        XCTAssertNil(AppIconCache.icon(for: "com.example.Missing"))
+        XCTAssertNil(AppIconCache.icon(for: "com.example.Missing"))
+
+        XCTAssertEqual(lookups, ["com.example.Missing"])
+    }
+
     // MARK: volume restore (driver off — hardware-direct)
 
-    func testRestoreAppliesSavedVolumeWhenDriverOff() async {
+    func testRestoreLeavesHardwareVolumeAloneWhenDriverOff() async {
         let mock = MockAudioEngine()
         let model = makeModel(engine: mock, driver: false, saved: 0.6)
         await model.startMock(config: BamConfig())
@@ -58,8 +132,10 @@ final class ConsoleViewModelUseCaseTests: XCTestCase {
         await model.restoreOutputVolume()
 
         let applied = await mock.outputVolume(uid: "MockOutput")
-        XCTAssertEqual(applied ?? -1, 0.6, accuracy: 0.001, "restore must push saved level to the device")
-        XCTAssertEqual(model.outputVolume, 0.6, accuracy: 0.001)
+        XCTAssertEqual(applied ?? -1, 0.8, accuracy: 0.001,
+                       "driver-off mode must not push bam's saved level to the physical device")
+        XCTAssertEqual(model.outputVolume, 0.8, accuracy: 0.001,
+                       "driver-off mode should reflect the live hardware level")
         await model.stop()
     }
 
@@ -96,6 +172,29 @@ final class ConsoleViewModelUseCaseTests: XCTestCase {
         let dev = await mock.outputVolume(uid: "MockOutput")
         XCTAssertEqual(dev ?? -1, 0.6, accuracy: 0.001, "once capturing, restore raises to the saved level")
         XCTAssertEqual(model.outputVolume, 0.6, accuracy: 0.001)
+        await model.stop()
+    }
+
+    func testStaleRouterStartCannotOverwriteNewerGainConfig() async {
+        let mock = MockAudioEngine()
+        await mock.setStartRouterDelay(.milliseconds(200))
+        let model = makeModel(engine: mock, driver: true, saved: nil)
+        await model.startMock(config: BamConfig(
+            sources: [Source(id: "s0", name: "App", bundleIDs: ["com.x"])],
+            mixes: [Mix(id: "m0", name: "Mix", dest: .virtualSlot(0), sends: [Send(source: "s0")])],
+            pans: ["s0": 0.5]
+        ))
+
+        model.addDevice()
+        model.setDeviceLevel("m0", 0.25)
+
+        let latestApplied = await eventually { await mock.lastRouterConfig?.mixes.first { $0.id == "m0" }?.level == 0.25 }
+        XCTAssertTrue(latestApplied)
+
+        try? await Task.sleep(for: .milliseconds(260))
+
+        let level = await mock.lastRouterConfig?.mixes.first { $0.id == "m0" }?.level
+        XCTAssertEqual(level ?? -1, 0.25, accuracy: 0.001)
         await model.stop()
     }
 

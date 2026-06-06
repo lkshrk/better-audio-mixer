@@ -4,9 +4,6 @@ import Yams
 public struct BamConfig: Sendable, Equatable, Codable {
     public var master: Double
     public var masterMuted: Bool
-    public var outputDeviceUID: String?
-    public var groups: [Group]
-    // v3 router model (additive; v1/v2 ignore these).
     public var sources: [Source]
     public var mixes: [Mix]
     public var solo: String?                // Source.id, global single solo (Q14)
@@ -15,8 +12,6 @@ public struct BamConfig: Sendable, Equatable, Codable {
     public init(
         master: Double = 1.0,
         masterMuted: Bool = false,
-        outputDeviceUID: String? = nil,
-        groups: [Group] = [],
         sources: [Source] = [],
         mixes: [Mix] = [],
         solo: String? = nil,
@@ -24,8 +19,6 @@ public struct BamConfig: Sendable, Equatable, Codable {
     ) {
         self.master = master
         self.masterMuted = masterMuted
-        self.outputDeviceUID = outputDeviceUID
-        self.groups = groups
         self.sources = sources
         self.mixes = mixes
         self.solo = solo
@@ -33,15 +26,13 @@ public struct BamConfig: Sendable, Equatable, Codable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case master, masterMuted, outputDeviceUID, groups, sources, mixes, solo, pans
+        case master, masterMuted, sources, mixes, solo, pans
     }
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.master = try c.decodeIfPresent(Double.self, forKey: .master) ?? 1.0
         self.masterMuted = try c.decodeIfPresent(Bool.self, forKey: .masterMuted) ?? false
-        self.outputDeviceUID = try c.decodeIfPresent(String.self, forKey: .outputDeviceUID)
-        self.groups = try c.decodeIfPresent([Group].self, forKey: .groups) ?? []
         self.sources = try c.decodeIfPresent([Source].self, forKey: .sources) ?? []
         self.mixes = try c.decodeIfPresent([Mix].self, forKey: .mixes) ?? []
         self.solo = try c.decodeIfPresent(String.self, forKey: .solo)
@@ -63,19 +54,9 @@ public struct BamConfig: Sendable, Equatable, Codable {
     }
 
     public func validate() throws {
-        let unassigned = groups.filter(\.includesUnassigned).map(\.name)
-        if unassigned.count > 1 {
-            throw BamConfigError.multipleUnassignedGroups(unassigned)
-        }
-        let names = groups.map(\.name)
-        let dupes = Dictionary(grouping: names, by: { $0 }).filter { $0.value.count > 1 }.keys
-        if !dupes.isEmpty {
-            throw BamConfigError.duplicateGroupNames(Array(dupes))
-        }
         try validateRouting()
     }
 
-    /// v3 router validation. No-op when no sources/mixes are present (v1/v2).
     public func validateRouting() throws {
         guard !sources.isEmpty || !mixes.isEmpty else { return }
 
@@ -88,10 +69,35 @@ public struct BamConfig: Sendable, Equatable, Codable {
         if !dupMixes.isEmpty { throw BamConfigError.duplicateMixIDs(Array(dupMixes)) }
 
         let idSet = Set(sourceIDs)
+        var routedSources: [String: [String]] = [:]
         for mix in mixes {
             for send in mix.sends where !idSet.contains(send.source) {
                 throw BamConfigError.unknownSendSource(mix: mix.id, source: send.source)
             }
+            for send in mix.sends {
+                routedSources[send.source, default: []].append(mix.id)
+            }
+        }
+        let duplicateRoutes = routedSources
+            .filter { $0.value.count > 1 }
+            .sorted { $0.key < $1.key }
+            .map { source, mixes in SourceRouteConflict(source: source, mixes: mixes) }
+        if !duplicateRoutes.isEmpty {
+            throw BamConfigError.duplicateSourceRoutes(duplicateRoutes)
+        }
+
+        var appOwners: [String: [String]] = [:]
+        for source in sources where source.kind == .app {
+            for bundleID in source.bundleIDs {
+                appOwners[bundleID, default: []].append(source.id)
+            }
+        }
+        let duplicateApps = appOwners
+            .filter { $0.value.count > 1 }
+            .sorted { $0.key < $1.key }
+            .map { bundleID, sources in AppAssignmentConflict(bundleID: bundleID, sources: sources) }
+        if !duplicateApps.isEmpty {
+            throw BamConfigError.duplicateAppAssignments(duplicateApps)
         }
         if let solo, !idSet.contains(solo) {
             throw BamConfigError.unknownSoloSource(solo)
@@ -99,39 +105,53 @@ public struct BamConfig: Sendable, Equatable, Codable {
         let rest = sources.filter(\.isRemainder).map(\.id)
         if rest.count > 1 { throw BamConfigError.multipleRemainderSources(rest) }
     }
+}
 
-    /// Bundle IDs claimed by any explicit group. The "All Audio" remainder tap
-    /// excludes these so grouped audio is not double-counted.
-    public var explicitlyGroupedBundleIDs: Set<String> {
-        Set(groups.flatMap(\.bundleIDs))
+public struct SourceRouteConflict: Sendable, Equatable {
+    public var source: String
+    public var mixes: [String]
+
+    public init(source: String, mixes: [String]) {
+        self.source = source
+        self.mixes = mixes
     }
+}
 
-    public var unassignedGroup: Group? {
-        groups.first(where: \.includesUnassigned)
+public struct AppAssignmentConflict: Sendable, Equatable {
+    public var bundleID: String
+    public var sources: [String]
+
+    public init(bundleID: String, sources: [String]) {
+        self.bundleID = bundleID
+        self.sources = sources
     }
 }
 
 public enum BamConfigError: Error, Equatable, CustomStringConvertible {
-    case multipleUnassignedGroups([String])
-    case duplicateGroupNames([String])
     case duplicateSourceIDs([String])
     case duplicateMixIDs([String])
     case unknownSendSource(mix: String, source: String)
+    case duplicateSourceRoutes([SourceRouteConflict])
+    case duplicateAppAssignments([AppAssignmentConflict])
     case unknownSoloSource(String)
     case multipleRemainderSources([String])
 
     public var description: String {
         switch self {
-        case .multipleUnassignedGroups(let names):
-            return "Only one group may set includesUnassigned; found: \(names.joined(separator: ", "))"
-        case .duplicateGroupNames(let names):
-            return "Duplicate group names: \(names.joined(separator: ", "))"
         case .duplicateSourceIDs(let ids):
             return "Duplicate source ids: \(ids.joined(separator: ", "))"
         case .duplicateMixIDs(let ids):
             return "Duplicate mix ids: \(ids.joined(separator: ", "))"
         case .unknownSendSource(let mix, let source):
             return "Mix \(mix) sends from unknown source: \(source)"
+        case .duplicateSourceRoutes(let conflicts):
+            return "Sources may be routed to only one group: " + conflicts
+                .map { "\($0.source) in \($0.mixes.joined(separator: ", "))" }
+                .joined(separator: "; ")
+        case .duplicateAppAssignments(let conflicts):
+            return "Apps may belong to only one source group: " + conflicts
+                .map { "\($0.bundleID) in \($0.sources.joined(separator: ", "))" }
+                .joined(separator: "; ")
         case .unknownSoloSource(let id):
             return "Solo references unknown source: \(id)"
         case .multipleRemainderSources(let ids):

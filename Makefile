@@ -39,6 +39,7 @@ install: generate
 		-configuration Release -derivedDataPath $(DERIVED_REL) build
 	@osascript -e 'set volume output volume $(SAFE_VOLUME)'
 	-pkill -x bam
+	-pkill -x "bam dev"
 	rm -rf "$(INSTALL_DIR)/bam.app"
 	cp -R "$(RELEASE_APP)" "$(INSTALL_DIR)/bam.app"
 	open "$(INSTALL_DIR)/bam.app"

@@ -99,7 +99,13 @@ extension Color {
 
 /// Stable vivid identity color for an id when no explicit hue is stored.
 enum Palette {
-    static func hue(for id: String) -> Double { Double(abs(id.hashValue) % 360) / 360.0 }
+    static func hue(for id: String) -> Double {
+        var hash: UInt64 = 1_469_598_103_934_665_603
+        for byte in id.utf8 {
+            hash = (hash ^ UInt64(byte)) &* 1_099_511_628_211
+        }
+        return Double(hash % 360) / 360.0
+    }
     static func color(hue: Double) -> Color { Color(hue: hue, saturation: 0.5, brightness: 0.92) }
     static func color(forID id: String) -> Color { color(hue: hue(for: id)) }
 }
@@ -345,13 +351,34 @@ struct Chip: View {
 /// Resolved app icons by bundle id (NSWorkspace lookup), cached per process.
 @MainActor
 enum AppIconCache {
-    private static var cache: [String: NSImage?] = [:]
+    private enum Entry {
+        case found(NSImage)
+        case missing
+    }
+
+    private static var cache: [String: Entry] = [:]
+    static var resolveIconForTests: ((String) -> NSImage?)?
+
     static func icon(for bundleID: String) -> NSImage? {
-        if let hit = cache[bundleID] { return hit }
-        let img = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)
-            .map { NSWorkspace.shared.icon(forFile: $0.path) }
-        cache[bundleID] = img
+        if let hit = cache[bundleID] {
+            switch hit {
+            case .found(let image): return image
+            case .missing: return nil
+            }
+        }
+        let img: NSImage?
+        if let resolveIconForTests {
+            img = resolveIconForTests(bundleID)
+        } else {
+            img = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)
+                .map { NSWorkspace.shared.icon(forFile: $0.path) }
+        }
+        cache[bundleID] = img.map(Entry.found) ?? .missing
         return img
+    }
+
+    static func resetForTests() {
+        cache.removeAll()
     }
 }
 

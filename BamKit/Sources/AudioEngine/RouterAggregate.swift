@@ -10,6 +10,30 @@ import Foundation
 /// race. The taps are `.mutedWhenTapped`, so each captured app's own output is
 /// silenced and only bam's summed mix reaches the hardware.
 final class RouterAggregate {
+    struct HealthSnapshot: Equatable {
+        let fires: Int
+        let inputBuffers: Int
+        let inputChannels: Int
+        let inputFrames: Int
+        let outputBuffers: Int
+        let outputChannels: Int
+        let outputFrames: Int
+        let outputPeak: Float
+        let limiterHits: Int
+
+        var hasAdvancedIO: Bool { fires > 0 && outputFrames > 0 }
+        var hasExpectedInput: Bool { inputBuffers > 0 && inputChannels > 0 && inputFrames > 0 }
+    }
+
+    struct SourceHealthSnapshot: Equatable {
+        let sourceID: String
+        let inputBlocks: Int
+        let inputFrames: Int
+        let meter: Float
+        let sampleRate: Double
+        let channels: Int
+    }
+
     /// One captured source: its tap, channel count, live L/R gain and meter.
     final class Tap {
         let sourceID: String
@@ -18,6 +42,10 @@ final class RouterAggregate {
         let gainL = AtomicFloat(0)
         let gainR = AtomicFloat(0)
         let meter = AtomicFloat(RMSMeter.floorDB)
+        let meterL = AtomicFloat(RMSMeter.floorDB)
+        let meterR = AtomicFloat(RMSMeter.floorDB)
+        let inputBlocks = ManagedAtomic<Int>(0)
+        let inputFrames = ManagedAtomic<Int>(0)
 
         init(sourceID: String, proc: ProcessTap) {
             self.sourceID = sourceID
@@ -36,9 +64,14 @@ final class RouterAggregate {
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
     private var sumSqScratch: UnsafeMutablePointer<Float>?
+    private var sumSqLScratch: UnsafeMutablePointer<Float>?
+    private var sumSqRScratch: UnsafeMutablePointer<Float>?
     private var cntScratch: UnsafeMutablePointer<Int>?
+    private var cntLScratch: UnsafeMutablePointer<Int>?
+    private var cntRScratch: UnsafeMutablePointer<Int>?
     private var chTapScratch: UnsafeMutablePointer<Int>?
     private var chRightScratch: UnsafeMutablePointer<Int>?
+    private var limiterGainScratch: UnsafeMutablePointer<Float>?
     /// Frames elapsed since this aggregate's IOProc started, used for the
     /// start-up fade-in. Single-writer (the audio thread), so a plain pointer is
     /// safe and lock-free; no atomic needed.
@@ -56,9 +89,11 @@ final class RouterAggregate {
     private let dInCh0 = ManagedAtomic<Int>(0)
     private let dInChTotal = ManagedAtomic<Int>(0)
     private let dInFrames = ManagedAtomic<Int>(0)
+    private let dOutBufs = ManagedAtomic<Int>(0)
     private let dOutCh = ManagedAtomic<Int>(0)
     private let dOutFrames = ManagedAtomic<Int>(0)
     private let dOutPeak = ManagedAtomic<UInt32>(0)
+    private let dLimiterHits = ManagedAtomic<Int>(0)
 
     init?(outputUID: String, taps orderedTaps: [Tap]) {
         guard !orderedTaps.isEmpty else { return nil }
@@ -93,7 +128,44 @@ final class RouterAggregate {
         return taps[i].meter.load()
     }
 
+    func stereoMeter(sourceID: String) -> (left: Float, right: Float) {
+        guard let i = tapIndexByID[sourceID] else { return (RMSMeter.floorDB, RMSMeter.floorDB) }
+        return (taps[i].meterL.load(), taps[i].meterR.load())
+    }
+
+    func healthSnapshot() -> HealthSnapshot {
+        HealthSnapshot(
+            fires: dFires.load(ordering: .relaxed),
+            inputBuffers: dInBufs.load(ordering: .relaxed),
+            inputChannels: dInChTotal.load(ordering: .relaxed),
+            inputFrames: dInFrames.load(ordering: .relaxed),
+            outputBuffers: dOutBufs.load(ordering: .relaxed),
+            outputChannels: dOutCh.load(ordering: .relaxed),
+            outputFrames: dOutFrames.load(ordering: .relaxed),
+            outputPeak: Float(bitPattern: dOutPeak.load(ordering: .relaxed)),
+            limiterHits: dLimiterHits.load(ordering: .relaxed)
+        )
+    }
+
+    func sourceHealthSnapshots() -> [SourceHealthSnapshot] {
+        taps.map { tap in
+            let format = tap.proc.currentFormat() ?? tap.proc.format
+            return SourceHealthSnapshot(
+                sourceID: tap.sourceID,
+                inputBlocks: tap.inputBlocks.load(ordering: .relaxed),
+                inputFrames: tap.inputFrames.load(ordering: .relaxed),
+                meter: tap.meter.load(),
+                sampleRate: format.mSampleRate,
+                channels: Int(format.mChannelsPerFrame)
+            )
+        }
+    }
+
     private func createAggregate(outputUID: String) -> Bool {
+        let signpostID = engineSignposter.makeSignpostID()
+        let signpostState = engineSignposter.beginInterval("RouterAggregate.create", id: signpostID)
+        defer { engineSignposter.endInterval("RouterAggregate.create", signpostState) }
+
         let tapList = taps.map {
             [kAudioSubTapUIDKey: $0.proc.uuid, kAudioSubTapDriftCompensationKey: 0] as [String: Any]
         }
@@ -108,7 +180,9 @@ final class RouterAggregate {
             kAudioAggregateDeviceTapListKey: tapList,
         ]
         let st = AudioHardwareCreateAggregateDevice(dict as CFDictionary, &aggregateID)
-        bamLog("router createAggregate out=\(outputUID) taps=\(taps.count) inChans=\(channelMap.count) status=\(st) aggID=\(aggregateID)")
+        engineLog.debug(
+            "router createAggregate out=\(outputUID, privacy: .private) taps=\(self.taps.count, privacy: .public) inChans=\(self.channelMap.count, privacy: .public) status=\(st, privacy: .public) aggID=\(self.aggregateID, privacy: .public)"
+        )
         return st == noErr && aggregateID != AudioObjectID(kAudioObjectUnknown)
     }
 
@@ -117,11 +191,23 @@ final class RouterAggregate {
         let mapCount = channelMap.count
 
         let sumSq = UnsafeMutablePointer<Float>.allocate(capacity: max(1, nTaps))
+        let sumSqL = UnsafeMutablePointer<Float>.allocate(capacity: max(1, nTaps))
+        let sumSqR = UnsafeMutablePointer<Float>.allocate(capacity: max(1, nTaps))
         let cnt = UnsafeMutablePointer<Int>.allocate(capacity: max(1, nTaps))
+        let cntL = UnsafeMutablePointer<Int>.allocate(capacity: max(1, nTaps))
+        let cntR = UnsafeMutablePointer<Int>.allocate(capacity: max(1, nTaps))
         sumSq.initialize(repeating: 0, count: max(1, nTaps))
+        sumSqL.initialize(repeating: 0, count: max(1, nTaps))
+        sumSqR.initialize(repeating: 0, count: max(1, nTaps))
         cnt.initialize(repeating: 0, count: max(1, nTaps))
+        cntL.initialize(repeating: 0, count: max(1, nTaps))
+        cntR.initialize(repeating: 0, count: max(1, nTaps))
         sumSqScratch = sumSq
+        sumSqLScratch = sumSqL
+        sumSqRScratch = sumSqR
         cntScratch = cnt
+        cntLScratch = cntL
+        cntRScratch = cntR
 
         // Flat primitive channel map. The RT block indexes these instead of the
         // tuple array `channelMap`, so the audio thread never instantiates tuple
@@ -142,31 +228,66 @@ final class RouterAggregate {
         played.initialize(to: 0)
         playedScratch = played
         let fadeIn = Self.fadeInFrames
+        let limiterGain = UnsafeMutablePointer<Float>.allocate(capacity: 1)
+        limiterGain.initialize(to: 1)
+        limiterGainScratch = limiterGain
 
         let gainL = taps.map(\.gainL)
         let gainR = taps.map(\.gainR)
         let meters = taps.map(\.meter)
+        let metersL = taps.map(\.meterL)
+        let metersR = taps.map(\.meterR)
+        let tapInputBlocks = taps.map(\.inputBlocks)
+        let tapInputFrames = taps.map(\.inputFrames)
 
         let dFires = self.dFires, dInBufs = self.dInBufs, dInCh0 = self.dInCh0
         let dInChTotal = self.dInChTotal, dInFrames = self.dInFrames
-        let dOutCh = self.dOutCh, dOutFrames = self.dOutFrames, dOutPeak = self.dOutPeak
+        let dOutBufs = self.dOutBufs, dOutCh = self.dOutCh
+        let dOutFrames = self.dOutFrames, dOutPeak = self.dOutPeak
+        let dLimiterHits = self.dLimiterHits
 
         let block: AudioDeviceIOBlock = { _, inInputData, _, outOutputData, _ in
             let inABL = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inInputData))
             let outABL = UnsafeMutableAudioBufferListPointer(outOutputData)
             guard outABL.count > 0 else { return }
-            let outBuf = outABL[0]
-            guard let outData = outBuf.mData else { return }
-            let outCh = Int(outBuf.mNumberChannels)
-            guard outCh > 0 else { return }
-            let outFrames = Int(outBuf.mDataByteSize) / (MemoryLayout<Float>.size * outCh)
-            let out = outData.assumingMemoryBound(to: Float.self)
-            let outTotal = outFrames * outCh
+            let firstOut = outABL[0]
+            guard let firstOutData = firstOut.mData else { return }
+            let firstOutCh = Int(firstOut.mNumberChannels)
+            guard firstOutCh > 0 else { return }
+            let outFrames0 = Int(firstOut.mDataByteSize) / (MemoryLayout<Float>.size * firstOutCh)
+            var outFrames = outFrames0
+            var planarStereo = false
+            var rightOutData: UnsafeMutableRawPointer?
+            if outABL.count >= 2, firstOutCh == 1, Int(outABL[1].mNumberChannels) == 1, let right = outABL[1].mData {
+                planarStereo = true
+                rightOutData = right
+                let rightFrames = Int(outABL[1].mDataByteSize) / MemoryLayout<Float>.size
+                if rightFrames < outFrames { outFrames = rightFrames }
+            }
+            let out = firstOutData.assumingMemoryBound(to: Float.self)
+            let rightOut = rightOutData?.assumingMemoryBound(to: Float.self)
 
-            var z = 0
-            while z < outTotal { out[z] = 0; z += 1 }
+            var oz = 0
+            while oz < outABL.count {
+                let b = outABL[oz]
+                if let data = b.mData {
+                    let n = Int(b.mDataByteSize) / MemoryLayout<Float>.size
+                    let p = data.assumingMemoryBound(to: Float.self)
+                    var z = 0
+                    while z < n { p[z] = 0; z += 1 }
+                }
+                oz += 1
+            }
             var tz = 0
-            while tz < nTaps { sumSq[tz] = 0; cnt[tz] = 0; tz += 1 }
+            while tz < nTaps {
+                sumSq[tz] = 0
+                sumSqL[tz] = 0
+                sumSqR[tz] = 0
+                cnt[tz] = 0
+                cntL[tz] = 0
+                cntR[tz] = 0
+                tz += 1
+            }
 
             // Walk input as one flat channel sequence in ABL order, which equals
             // tap-list order. Each channel sums into the output L or R by its
@@ -192,17 +313,40 @@ final class RouterAggregate {
                         let tIdx = chTap[gc]
                         let isR = chRight[gc] == 1
                         let g = isR ? gainR[tIdx].load() : gainL[tIdx].load()
-                        let dstCh = outCh >= 2 ? (isR ? 1 : 0) : 0
                         var ss: Float = 0
                         var f = 0
-                        while f < frames {
-                            let s = p[f * bch + localCh]
-                            ss += s * s
-                            out[f * outCh + dstCh] += s * g
-                            f += 1
+                        if planarStereo, isR, let rightOut {
+                            while f < frames {
+                                let s = p[f * bch + localCh]
+                                ss += s * s
+                                rightOut[f] += s * g
+                                f += 1
+                            }
+                        } else if planarStereo {
+                            while f < frames {
+                                let s = p[f * bch + localCh]
+                                ss += s * s
+                                out[f] += s * g
+                                f += 1
+                            }
+                        } else {
+                            let dstCh = firstOutCh >= 2 ? (isR ? 1 : 0) : 0
+                            while f < frames {
+                                let s = p[f * bch + localCh]
+                                ss += s * s
+                                out[f * firstOutCh + dstCh] += s * g
+                                f += 1
+                            }
                         }
                         sumSq[tIdx] += ss
                         cnt[tIdx] += frames
+                        if isR {
+                            sumSqR[tIdx] += ss
+                            cntR[tIdx] += frames
+                        } else {
+                            sumSqL[tIdx] += ss
+                            cntL[tIdx] += frames
+                        }
                     }
                     localCh += 1
                 }
@@ -212,28 +356,67 @@ final class RouterAggregate {
             var mt = 0
             while mt < nTaps {
                 let rms = cnt[mt] > 0 ? (sumSq[mt] / Float(cnt[mt])).squareRoot() : 0
+                let rmsL = cntL[mt] > 0 ? (sumSqL[mt] / Float(cntL[mt])).squareRoot() : rms
+                let rmsR = cntR[mt] > 0 ? (sumSqR[mt] / Float(cntR[mt])).squareRoot() : rmsL
                 meters[mt].store(RMSMeter.dbFS(rms: rms))
+                metersL[mt].store(RMSMeter.dbFS(rms: rmsL))
+                metersR[mt].store(RMSMeter.dbFS(rms: rmsR))
+                if cnt[mt] > 0 {
+                    let frames = tapInputFrames[mt].load(ordering: .relaxed)
+                    tapInputFrames[mt].store(frames &+ cnt[mt], ordering: .relaxed)
+                    tapInputBlocks[mt].wrappingIncrement(ordering: .relaxed)
+                }
                 mt += 1
             }
 
-            // Start-up fade-in (declick) + hard limiter (anti-overflow), folded
-            // with the peak scan. The ramp lifts the first `fadeIn` frames 0→1 so
-            // a freshly started aggregate never steps from silence to full level;
-            // the ±1 clamp bounds summed overflow so stacked sources clip cleanly
-            // instead of wrapping. Both are pure RT arithmetic, no locks/IO.
+            // Start-up fade-in (declick) + peak limiter. The limiter scales the
+            // whole buffer instead of hard-clipping individual samples, preserving
+            // low-frequency waveform shape when multiple sources sum above 0 dBFS.
             let playedNow = played[0]
             var peak: Float = 0
-            var pz = 0
-            while pz < outTotal {
-                let frame = pz / outCh
-                let r = playedNow + frame
-                let ramp = r >= fadeIn ? 1 : Float(r) / Float(fadeIn)
-                var v = out[pz] * ramp
-                if v > 1 { v = 1 } else if v < -1 { v = -1 }
-                out[pz] = v
-                let a = v < 0 ? -v : v
-                if a > peak { peak = a }
-                pz += 1
+            var rp = 0
+            while rp < outABL.count {
+                let b = outABL[rp]
+                if let data = b.mData {
+                    let ch = max(1, Int(b.mNumberChannels))
+                    let n = Int(b.mDataByteSize) / MemoryLayout<Float>.size
+                    let p = data.assumingMemoryBound(to: Float.self)
+                    var i = 0
+                    while i < n {
+                        let frame = i / ch
+                        let r = playedNow + frame
+                        let ramp = r >= fadeIn ? 1 : Float(r) / Float(fadeIn)
+                        let v = p[i] * ramp
+                        p[i] = v
+                        let a = v < 0 ? -v : v
+                        if a > peak { peak = a }
+                        i += 1
+                    }
+                }
+                rp += 1
+            }
+            let targetScale = AudioLimiter.scale(forPeak: peak)
+            let limitScale = AudioLimiter.nextScale(current: limiterGain[0], target: targetScale)
+            limiterGain[0] = limitScale
+            if limitScale < 1 {
+                if targetScale < 1 {
+                    dLimiterHits.wrappingIncrement(ordering: .relaxed)
+                }
+                var lb = 0
+                while lb < outABL.count {
+                    let b = outABL[lb]
+                    if let data = b.mData {
+                        let n = Int(b.mDataByteSize) / MemoryLayout<Float>.size
+                        let p = data.assumingMemoryBound(to: Float.self)
+                        var li = 0
+                        while li < n {
+                            p[li] *= limitScale
+                            li += 1
+                        }
+                    }
+                    lb += 1
+                }
+                peak *= limitScale
             }
             played[0] = playedNow + outFrames
             dFires.wrappingIncrement(ordering: .relaxed)
@@ -241,11 +424,10 @@ final class RouterAggregate {
             dInCh0.store(nBufs > 0 ? Int(inABL[0].mNumberChannels) : 0, ordering: .relaxed)
             dInChTotal.store(inChTotal, ordering: .relaxed)
             dInFrames.store(outFrames, ordering: .relaxed)
-            dOutCh.store(outCh, ordering: .relaxed)
+            dOutBufs.store(outABL.count, ordering: .relaxed)
+            dOutCh.store(firstOutCh, ordering: .relaxed)
             dOutFrames.store(outFrames, ordering: .relaxed)
-            if peak > Float(bitPattern: dOutPeak.load(ordering: .relaxed)) {
-                dOutPeak.store(peak.bitPattern, ordering: .relaxed)
-            }
+            dOutPeak.store(peak.bitPattern, ordering: .relaxed)
         }
 
         let cst = AudioDeviceCreateIOProcIDWithBlock(&ioProcID, aggregateID, nil, block)
@@ -256,11 +438,11 @@ final class RouterAggregate {
         let sst = AudioDeviceStart(aggregateID, ioProcID)
         bamLog("router startIO createStatus=\(cst) startStatus=\(sst) expectInChans=\(mapCount)")
 
-        Task { [dFires, dInBufs, dInCh0, dInChTotal, dInFrames, dOutCh, dOutFrames, dOutPeak] in
+        Task { [dFires, dInBufs, dInCh0, dInChTotal, dInFrames, dOutBufs, dOutCh, dOutFrames, dOutPeak, dLimiterHits] in
             for _ in 0..<6 {
                 try? await Task.sleep(for: .seconds(2))
                 let pk = Float(bitPattern: dOutPeak.load(ordering: .relaxed))
-                bamLog("router fires=\(dFires.load(ordering: .relaxed)) inBufs=\(dInBufs.load(ordering: .relaxed)) inCh0=\(dInCh0.load(ordering: .relaxed)) inChTotal=\(dInChTotal.load(ordering: .relaxed)) inFrames=\(dInFrames.load(ordering: .relaxed)) outCh=\(dOutCh.load(ordering: .relaxed)) outFrames=\(dOutFrames.load(ordering: .relaxed)) outPeak=\(pk)")
+                bamLog("router fires=\(dFires.load(ordering: .relaxed)) inBufs=\(dInBufs.load(ordering: .relaxed)) inCh0=\(dInCh0.load(ordering: .relaxed)) inChTotal=\(dInChTotal.load(ordering: .relaxed)) inFrames=\(dInFrames.load(ordering: .relaxed)) outBufs=\(dOutBufs.load(ordering: .relaxed)) outCh0=\(dOutCh.load(ordering: .relaxed)) outFrames=\(dOutFrames.load(ordering: .relaxed)) outPeak=\(pk) limiterHits=\(dLimiterHits.load(ordering: .relaxed))")
             }
         }
         return sst == noErr
@@ -277,9 +459,14 @@ final class RouterAggregate {
             aggregateID = AudioObjectID(kAudioObjectUnknown)
         }
         sumSqScratch?.deallocate(); sumSqScratch = nil
+        sumSqLScratch?.deallocate(); sumSqLScratch = nil
+        sumSqRScratch?.deallocate(); sumSqRScratch = nil
         cntScratch?.deallocate(); cntScratch = nil
+        cntLScratch?.deallocate(); cntLScratch = nil
+        cntRScratch?.deallocate(); cntRScratch = nil
         chTapScratch?.deallocate(); chTapScratch = nil
         chRightScratch?.deallocate(); chRightScratch = nil
         playedScratch?.deallocate(); playedScratch = nil
+        limiterGainScratch?.deallocate(); limiterGainScratch = nil
     }
 }

@@ -43,6 +43,24 @@
       selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
       shouldUseLaunchSchemeArgsEnv = "YES"
       onlyGenerateCoverageForSpecifiedTargets = "NO">
+      <PostActions>
+         <ExecutionAction
+            ActionType = "Xcode.IDEStandardExecutionActionsCore.ExecutionActionType.ShellScriptAction">
+            <ActionContent
+               title = "Cleanup bam test host"
+               scriptText = "if [ -n &quot;$BUILT_PRODUCTS_DIR&quot; ]; then&#10;  /usr/bin/pkill -f &quot;$BUILT_PRODUCTS_DIR/bam dev.app/Contents/MacOS/[b]am dev&quot; || true&#10;fi&#10;">
+               <EnvironmentBuildable>
+                  <BuildableReference
+                     BuildableIdentifier = "primary"
+                     BlueprintIdentifier = "541D32C04E68D76BE0EEF0E7"
+                     BuildableName = "bam.app"
+                     BlueprintName = "bam"
+                     ReferencedContainer = "container:bam.xcodeproj">
+                  </BuildableReference>
+               </EnvironmentBuildable>
+            </ActionContent>
+         </ExecutionAction>
+      </PostActions>
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"

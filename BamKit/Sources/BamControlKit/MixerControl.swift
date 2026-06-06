@@ -12,9 +12,12 @@ public struct MixSnapshot: Sendable, Equatable {
     public let pct: Int         // pos * 100, rounded
     public let muted: Bool
     public let level: Float     // raw dBFS
+    public let levelLeft: Float // raw dBFS
+    public let levelRight: Float // raw dBFS
 
     public init(id: String, name: String, emoji: String,
-                pos: Double, pct: Int, muted: Bool, level: Float) {
+                pos: Double, pct: Int, muted: Bool, level: Float,
+                levelLeft: Float? = nil, levelRight: Float? = nil) {
         self.id = id
         self.name = name
         self.emoji = emoji
@@ -22,6 +25,8 @@ public struct MixSnapshot: Sendable, Equatable {
         self.pct = pct
         self.muted = muted
         self.level = level
+        self.levelLeft = levelLeft ?? level
+        self.levelRight = levelRight ?? level
     }
 }
 
@@ -31,13 +36,19 @@ public struct MasterSnapshot: Sendable, Equatable {
     public let pct: Int
     public let muted: Bool
     public let level: Float     // raw dBFS
+    public let levelLeft: Float // raw dBFS
+    public let levelRight: Float // raw dBFS
     public let icon: String     // SF Symbol name of the current output device (app's icon)
 
-    public init(pos: Double, pct: Int, muted: Bool, level: Float, icon: String = "hifispeaker.fill") {
+    public init(pos: Double, pct: Int, muted: Bool, level: Float,
+                levelLeft: Float? = nil, levelRight: Float? = nil,
+                icon: String = "hifispeaker.fill") {
         self.pos = pos
         self.pct = pct
         self.muted = muted
         self.level = level
+        self.levelLeft = levelLeft ?? level
+        self.levelRight = levelRight ?? level
         self.icon = icon
     }
 }
@@ -96,6 +107,6 @@ public protocol MixerControl: AnyObject {
 
     // MARK: Output selection
     func listOutputs() -> [OutputSnapshot]
-    /// Returns true if the switch was applied. v2 returns false (unsupported until v3).
+    /// Returns true if the switch was applied.
     func setOutputDevice(uid: String) -> Bool
 }

@@ -7,11 +7,13 @@ import XCTest
 private func makeMix(id: String = "m-game", name: String = "Game", emoji: String = "🎮",
                      pos: Double = 0.62, muted: Bool = false, level: Float = -18.3) -> MixSnapshot {
     MixSnapshot(id: id, name: name, emoji: emoji,
-                pos: pos, pct: Int((pos * 100).rounded()), muted: muted, level: level)
+                pos: pos, pct: Int((pos * 100).rounded()), muted: muted, level: level,
+                levelLeft: level - 2, levelRight: level - 8)
 }
 
 private func makeMaster(pos: Double = 0.5, muted: Bool = false, level: Float = -22.1) -> MasterSnapshot {
-    MasterSnapshot(pos: pos, pct: Int((pos * 100).rounded()), muted: muted, level: level)
+    MasterSnapshot(pos: pos, pct: Int((pos * 100).rounded()), muted: muted, level: level,
+                   levelLeft: level - 1, levelRight: level - 4)
 }
 
 // MARK: - Socket helpers
@@ -19,6 +21,20 @@ private func makeMaster(pos: Double = 0.5, muted: Bool = false, level: Float = -
 /// Write one NDJSON line to a file-descriptor.
 private func writeLine(_ fd: Int32, _ obj: [String: Any]) throws {
     var data = try JSONSerialization.data(withJSONObject: obj)
+    data.append(0x0A)
+    _ = data.withUnsafeBytes { buf -> Int in
+        var sent = 0
+        while sent < buf.count {
+            let n = Darwin.send(fd, buf.baseAddress! + sent, buf.count - sent, 0)
+            if n <= 0 { break }
+            sent += n
+        }
+        return sent
+    }
+}
+
+private func writeRawLine(_ fd: Int32, _ line: String) throws {
+    var data = Data(line.utf8)
     data.append(0x0A)
     _ = data.withUnsafeBytes { buf -> Int in
         var sent = 0
@@ -336,6 +352,19 @@ final class ControlServerTests: XCTestCase {
         XCTAssertLessThanOrEqual(n, 0, "Expected EOF after version mismatch")
     }
 
+    func testDiagnosticsTrackMalformedFramesAndClientCounts() async throws {
+        let fd = try connectFD()
+        defer { Darwin.close(fd) }
+
+        try writeRawLine(fd, "not-json")
+        try await Task.sleep(for: .milliseconds(100))
+
+        let diagnostics = server.diagnosticsSnapshot()
+        XCTAssertEqual(diagnostics.activeClients, 1)
+        XCTAssertEqual(diagnostics.acceptedClients, 1)
+        XCTAssertEqual(diagnostics.malformedFrames, 1)
+    }
+
     func testCmdSetPosMutatesMock() async throws {
         let (fd, _) = try await handshake()
         defer { Darwin.close(fd) }
@@ -431,6 +460,11 @@ final class ControlServerTests: XCTestCase {
         XCTAssertNotNil(meterFrame["master"])
         let master = meterFrame["master"] as? [String: Any]
         XCTAssertNotNil(master?["level"])
+        XCTAssertNotNil(master?["levelLeft"])
+        XCTAssertNotNil(master?["levelRight"])
+        let mixes = meterFrame["mixes"] as? [[String: Any]]
+        XCTAssertNotNil(mixes?.first?["levelLeft"])
+        XCTAssertNotNil(mixes?.first?["levelRight"])
     }
 
     func testMultiClientFanOut() async throws {
@@ -457,6 +491,7 @@ final class ControlServerTests: XCTestCase {
         defer { Darwin.close(fd2) }
         // If we got here, the server survived the dead client
         XCTAssert(true)
+        XCTAssertGreaterThanOrEqual(server.diagnosticsSnapshot().removedClients, 1)
     }
 
     func testSnapshotDiffEmitsDeltaOnPosChange() async throws {

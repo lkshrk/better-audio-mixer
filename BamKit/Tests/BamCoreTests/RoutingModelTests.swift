@@ -12,13 +12,12 @@ final class RoutingModelTests: XCTestCase {
             mixes: [
                 Mix(id: "stream", name: "Stream", dest: .virtualSlot(0), level: 1.0, sends: [
                     Send(source: "game", level: 0.8),
-                    Send(source: "chatapp", level: 1.0),
                 ]),
                 Mix(id: "chat", name: "Chat", dest: .virtualSlot(1), sends: [
-                    Send(source: "game", level: 0.5), // mix-minus: no chatapp
+                    Send(source: "chatapp", level: 1.0),
                 ]),
                 Mix(id: "monitor", name: "Monitor", dest: .hardware(uid: "BuiltInSpeaker"), sends: [
-                    Send(source: "game"), Send(source: "chatapp"),
+                    Send(source: "rest"),
                 ]),
             ],
             solo: nil,
@@ -82,6 +81,37 @@ final class RoutingModelTests: XCTestCase {
         }
     }
 
+    func testRejectsSourceRoutedToMultipleMixes() {
+        let cfg = BamConfig(
+            sources: [Source(id: "a", name: "A")],
+            mixes: [
+                Mix(id: "m1", name: "M1", dest: .virtualSlot(0), sends: [Send(source: "a")]),
+                Mix(id: "m2", name: "M2", dest: .virtualSlot(1), sends: [Send(source: "a")]),
+            ]
+        )
+        XCTAssertThrowsError(try cfg.validate()) {
+            XCTAssertEqual(
+                $0 as? BamConfigError,
+                .duplicateSourceRoutes([SourceRouteConflict(source: "a", mixes: ["m1", "m2"])])
+            )
+        }
+    }
+
+    func testRejectsAppAssignedToMultipleSources() {
+        let cfg = BamConfig(sources: [
+            Source(id: "a", name: "A", bundleIDs: ["com.example.App"]),
+            Source(id: "b", name: "B", bundleIDs: ["com.example.App"]),
+        ])
+        XCTAssertThrowsError(try cfg.validate()) {
+            XCTAssertEqual(
+                $0 as? BamConfigError,
+                .duplicateAppAssignments([
+                    AppAssignmentConflict(bundleID: "com.example.App", sources: ["a", "b"])
+                ])
+            )
+        }
+    }
+
     func testRejectsMultipleRemainders() {
         let cfg = BamConfig(sources: [
             Source(id: "r1", name: "Rest1", kind: .rest),
@@ -90,11 +120,4 @@ final class RoutingModelTests: XCTestCase {
         XCTAssertThrowsError(try cfg.validate())
     }
 
-    func testLegacyConfigStillValidatesWithoutRouting() throws {
-        // v1/v2 config: only groups, no sources/mixes → routing validation no-ops.
-        let cfg = BamConfig(groups: [Group(name: "All", includesUnassigned: true)])
-        try cfg.validate()
-        XCTAssertTrue(cfg.sources.isEmpty)
-        XCTAssertTrue(cfg.mixes.isEmpty)
-    }
 }

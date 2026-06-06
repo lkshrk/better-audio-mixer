@@ -1,9 +1,6 @@
 import Foundation
 
 public actor MockAudioEngine: AudioEngineProtocol {
-    private var task: Task<Void, Never>?
-    private var groups: [Group] = []
-
     /// When true, the router meter stream reports floor-level (silent) sources —
     /// simulating taps that are running but not yet capturing (e.g. before the
     /// capture-permission popup is accepted). Lets tests exercise the launch
@@ -13,35 +10,6 @@ public actor MockAudioEngine: AudioEngineProtocol {
     public init(silentRouter: Bool = false) {
         self.silentRouter = silentRouter
     }
-
-    public func start(config: BamConfig) -> AsyncStream<MeterSnapshot> {
-        groups = config.groups
-        return AsyncStream { continuation in
-            let t = Task { [weak self] in
-                var phase: Float = 0
-                while !Task.isCancelled {
-                    guard let self else { break }
-                    phase += 0.15
-                    let groups = await self.groups
-                    continuation.yield(Self.snapshot(groups: groups, phase: phase))
-                    try? await Task.sleep(for: .milliseconds(100))
-                }
-                continuation.finish()
-            }
-            self.task = t
-            continuation.onTermination = { _ in t.cancel() }
-        }
-    }
-
-    public func update(config: BamConfig) {
-        groups = config.groups
-    }
-
-    public func applyGains(config: BamConfig) {
-        groups = config.groups
-    }
-
-    public func setEnforce(_ on: Bool) {}
 
     public func outputDevices() -> [AudioDevice] {
         [AudioDevice(uid: "MockOutput", name: "Built-in Output")]
@@ -60,22 +28,30 @@ public actor MockAudioEngine: AudioEngineProtocol {
     public func setOutputMuted(uid: String, _ muted: Bool) { mockMuted = muted }
 
     public func runningAudioApps() -> [AudioApp] {
-        groups.flatMap(\.bundleIDs).map {
-            AudioApp(bundleID: $0, displayName: $0.components(separatedBy: ".").last ?? $0)
-        }
+        routerConfig?.sources
+            .flatMap(\.bundleIDs)
+            .map { AudioApp(bundleID: $0, displayName: $0.components(separatedBy: ".").last ?? $0) }
+        ?? []
     }
 
-    public func playingBundleIDs() -> Set<String> { Set(groups.flatMap(\.bundleIDs)) }
+    public func playingBundleIDs() -> Set<String> {
+        Set(routerConfig?.sources.flatMap(\.bundleIDs) ?? [])
+    }
 
     public func stop() {
-        task?.cancel()
-        task = nil
+        stopRouter()
     }
 
     // MARK: v3 router (mock)
 
     private var routerConfig: BamConfig?
     private var routerTask: Task<Void, Never>?
+    public var lastRouterConfig: BamConfig? { routerConfig }
+    private var startRouterDelay: Duration?
+
+    public func setStartRouterDelay(_ delay: Duration?) {
+        startRouterDelay = delay
+    }
 
     /// Test hook: statuses returned by successive `startRouter` calls. Each call
     /// pops the front; once drained, `.ok`. Empty by default → mock returns `.ok`
@@ -86,7 +62,11 @@ public actor MockAudioEngine: AudioEngineProtocol {
     }
     public private(set) var startRouterCalls = 0
 
-    public func startRouter(config: BamConfig) -> RouterStatus {
+    public func startRouter(config: BamConfig) async -> RouterStatus {
+        if let startRouterDelay {
+            try? await Task.sleep(for: startRouterDelay)
+            if Task.isCancelled { return RouterStatus(cause: .ok) }
+        }
         routerConfig = config
         startRouterCalls += 1
         return scriptedRouterStatuses.isEmpty ? .ok : scriptedRouterStatuses.removeFirst()
@@ -103,6 +83,24 @@ public actor MockAudioEngine: AudioEngineProtocol {
     /// subscribers retry, mirroring the real engine's CoreAudio listeners.
     public func emitRouterEvent() {
         routerEventSink?.yield(())
+    }
+
+    private var routerRecoveryEventSink: AsyncStream<RouterRecoveryEvent>.Continuation?
+    public private(set) var resetRouterRecoveryCalls = 0
+
+    public func routerRecoveryEvents() -> AsyncStream<RouterRecoveryEvent> {
+        AsyncStream { continuation in
+            routerRecoveryEventSink = continuation
+        }
+    }
+
+    public func emitRouterRecoveryEvent(_ event: RouterRecoveryEvent) {
+        routerRecoveryEventSink?.yield(event)
+    }
+
+    public func resetRouterRecovery() {
+        resetRouterRecoveryCalls += 1
+        routerRecoveryEventSink?.yield(.recovered)
     }
 
     public func updateRouterGains(config: BamConfig) {
@@ -149,38 +147,4 @@ public actor MockAudioEngine: AudioEngineProtocol {
         return RouterSnapshot(sources: sources, mixes: mixes)
     }
 
-    private static func snapshot(groups: [Group], phase: Float) -> MeterSnapshot {
-        func level(_ seed: Float) -> Float {
-            let amp = (sin(phase + seed) * 0.5 + 0.5)
-            return RMSMeter.dbFS(rms: 0.0005 + amp * 0.7)
-        }
-        let groupMeters: [GroupMeter] = groups.enumerated().map { i, g in
-            let sources = g.bundleIDs.enumerated().map { j, bid in
-                SourceMeter(
-                    bundleID: bid,
-                    displayName: bid.components(separatedBy: ".").last ?? bid,
-                    deviceUID: "MockOutput",
-                    deviceName: "Built-in Output",
-                    level: level(Float(i * 3 + j))
-                )
-            }
-            return GroupMeter(
-                name: g.name,
-                volume: g.volume,
-                muted: g.muted,
-                level: RMSMeter.combine(sources.map(\.level)),
-                sources: sources,
-                isUnassignedBucket: g.includesUnassigned
-            )
-        }
-        let unassigned: GroupMeter? = groups.contains(where: \.includesUnassigned) ? nil : GroupMeter(
-            name: "All Audio",
-            volume: 1.0,
-            muted: false,
-            level: level(50),
-            sources: [],
-            isUnassignedBucket: true
-        )
-        return MeterSnapshot(master: level(99), groups: groupMeters, unassigned: unassigned)
-    }
 }

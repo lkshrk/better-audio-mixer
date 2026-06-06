@@ -108,10 +108,10 @@ final class RouterSmokeTests: XCTestCase {
         defer { _ = setConfig(plugin, []) }
         // Wait for publication.
         var tries = 0
-        while VirtualDeviceClient.deviceID(forUID: "BAM_UID_0") == nil, tries < 50 {
+        while ProcessEnumerator.deviceID(forUID: "BAM_UID_0") == nil, tries < 50 {
             usleep(100_000); tries += 1
         }
-        guard let dev = VirtualDeviceClient.deviceID(forUID: "BAM_UID_0") else {
+        guard let dev = ProcessEnumerator.deviceID(forUID: "BAM_UID_0") else {
             return XCTFail("BAM_UID_0 not published")
         }
 
