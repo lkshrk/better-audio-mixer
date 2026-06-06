@@ -246,10 +246,16 @@ final class ActionRouter {
     ]
     static let masterAccent = NSColor(calibratedRed: 0.70, green: 0.45, blue: 0.95, alpha: 1)
 
-    static func accent(forID id: String) -> NSColor {
+    nonisolated static func accent(forID id: String) -> NSColor {
         var h: UInt64 = 1469598103934665603 // FNV-1a
         for byte in id.utf8 { h = (h ^ UInt64(byte)) &* 1099511628211 }
-        return accentPalette[Int(h % UInt64(accentPalette.count))]
+        switch h % 5 {
+        case 0: return NSColor(calibratedRed: 0.36, green: 0.62, blue: 1.00, alpha: 1)
+        case 1: return NSColor(calibratedRed: 0.30, green: 0.80, blue: 0.45, alpha: 1)
+        case 2: return NSColor(calibratedRed: 1.00, green: 0.55, blue: 0.30, alpha: 1)
+        case 3: return NSColor(calibratedRed: 0.95, green: 0.40, blue: 0.55, alpha: 1)
+        default: return NSColor(calibratedRed: 0.30, green: 0.78, blue: 0.82, alpha: 1)
+        }
     }
 
     static func normalizedVisualStyle(_ rawValue: String?) -> KeyStyleImage.KeyStyle {
