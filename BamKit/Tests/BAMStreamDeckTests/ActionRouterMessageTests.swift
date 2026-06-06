@@ -35,20 +35,30 @@ struct ActionRouterMessageTests {
     private let masterAction = "me.harke.better-audio-mixer.streamdeck.master"
     private let outputAction = "me.harke.better-audio-mixer.streamdeck.output"
 
-    @Test func keypadMeterFramesDoNotPushLivePNGs() {
+    @Test func keypadMeterFramesPushLiveSVGsWithoutRepeatingKeyState() {
         let elgato = RecordingElgato()
         let router = ActionRouter(elgato: elgato)
         bindDevice(router, context: "key", controller: "Keypad", settings: [
             "mix": "m-game",
-            "keyStyle": "meter",
+            "keyStyle": "channel",
         ])
         router.ingestBAMFrame(stateFrame())
         elgato.removeAll()
 
         router.ingestBAMFrame(meterFrame(level: -12))
 
+        #expect(elgato.events.contains { event in
+            if case .setImage(let image, _) = event {
+                return image?.hasPrefix("data:image/svg+xml;base64,") == true
+            }
+            return false
+        })
+
+        elgato.removeAll()
+        router.ingestBAMFrame(meterFrame(level: -12))
+
         #expect(!elgato.events.contains { event in
-            if case .setImage = event { return true }
+            if case .setState = event { return true }
             return false
         })
     }

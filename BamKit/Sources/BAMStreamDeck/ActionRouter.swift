@@ -107,6 +107,8 @@ final class ActionRouter {
     private var keyImageSig: [String: String] = [:]
     private var lastDialFeedback: [String: TimeInterval] = [:]
     private var dialFeedbackSig: [String: String] = [:]
+    private var keyMeterSig: [String: String] = [:]
+    private var keyStateSig: [String: Int] = [:]
     private var titleSig: [String: String] = [:]
     private var colorSigCache: [String: String] = [:]
     private var piAction: String?
@@ -137,6 +139,8 @@ final class ActionRouter {
                 keyImageSig[ctx] = nil
                 lastDialFeedback[ctx] = nil
                 dialFeedbackSig[ctx] = nil
+                keyMeterSig[ctx] = nil
+                keyStateSig[ctx] = nil
                 titleSig[ctx] = nil
                 colorSigCache[ctx] = nil
             }
@@ -164,6 +168,8 @@ final class ActionRouter {
         keyImageSig[ctx] = nil
         lastDialFeedback[ctx] = nil
         dialFeedbackSig[ctx] = nil
+        keyMeterSig[ctx] = nil
+        keyStateSig[ctx] = nil
         titleSig[ctx] = nil
         colorSigCache[ctx] = nil
         if controller == "Encoder" {
@@ -277,6 +283,18 @@ final class ActionRouter {
         case .retro: steps = 100
         }
         return Int((clamped * steps).rounded())
+    }
+
+    private static func keyMeterSignature(style: KeyStyleImage.KeyStyle, level: StereoLevel, muted: Bool) -> String {
+        switch style {
+        case .meter:
+            let leftStep = keyLevelSignature(style: style, level: levelFraction(level.left), muted: muted)
+            let rightStep = keyLevelSignature(style: style, level: levelFraction(level.right), muted: muted)
+            return "\(Self.styleSignature(style))|\(leftStep)|\(rightStep)|\(muted ? "m" : "u")"
+        case .channel, .retro:
+            let step = keyLevelSignature(style: style, level: levelFraction(level.mono), muted: muted)
+            return "\(Self.styleSignature(style))|\(step)|\(muted ? "m" : "u")"
+        }
     }
 
     private func keyStyle(_ b: Binding) -> KeyStyleImage.KeyStyle {
@@ -457,9 +475,10 @@ final class ActionRouter {
         pendingOutputContext = nil
     }
 
-    /// Level-only frame (~30fps). Drives the LCD meter bars on dials at the full
-    /// source rate — the base64 icon is cached in `dialIconSig`, so each meter
-    /// frame only ships tiny value/bar numbers. Keys ignore meters.
+    /// Level-only frame (~30fps). Drives dial LCD meters at the full source rate,
+    /// and refreshes styled key meters when their visible level step changes.
+    /// Dial feedback mostly ships tiny value/bar numbers; keys are guarded by
+    /// `keyImageSig`, with segmented styles quantized to their drawn state count.
     private func ingestMeter(_ obj: [String: Any]) {
         let now = Date().timeIntervalSinceReferenceDate
         for m in obj["mixes"] as? [[String: Any]] ?? [] {
@@ -481,6 +500,7 @@ final class ActionRouter {
             _ = masterPeakWindow.append(left: masterLevel.left, right: masterLevel.right, at: now)
         }
         for (ctx, b) in contexts where b.kind.isDial || b.isEncoder { refresh(ctx, meterFrameAt: now) }
+        for (ctx, b) in contexts where shouldRefreshKeyMeter(context: ctx, binding: b) { refresh(ctx) }
     }
 
     /// Ballistics for the LCD level meter. The dial needle exposes latency more
@@ -580,14 +600,15 @@ final class ActionRouter {
                 elgato.setImage(nil, context: ctx); setTitleIfChanged("", context: ctx); return
             }
             if ((b.settings["mode"] as? String) ?? "mute") == "mute" {
-                elgato.setState(info.muted ? 1 : 0, context: ctx)
+                setStateIfChanged(info.muted ? 1 : 0, context: ctx)
             }
             let accent = Self.accent(forID: mixID)
+            let level = levels[mixID] ?? Self.silentStereo
             pushKeyImage(ctx, style: keyStyle(b), glyph: deviceGlyph(info),
                          monogram: initials(info.name), accent: accent,
                          colorSig: colorSignature(forContext: ctx, accent: accent),
                          name: info.name, pct: info.pct,
-                         level: levels[mixID]?.mono ?? Self.meterFloorDB,
+                         level: level,
                          muted: info.muted)
             setTitleIfChanged("", context: ctx) // name/% are baked into the image
         case .master:
@@ -603,12 +624,12 @@ final class ActionRouter {
                 return
             }
             if ((b.settings["mode"] as? String) ?? "mute") == "mute" {
-                elgato.setState(masterMuted ? 1 : 0, context: ctx)
+                setStateIfChanged(masterMuted ? 1 : 0, context: ctx)
             }
             pushKeyImage(ctx, style: keyStyle(b), glyph: .symbol(masterIcon),
                          monogram: "M", accent: Self.masterAccent,
                          colorSig: colorSignature(forContext: ctx, accent: Self.masterAccent),
-                         name: "Master", pct: masterPct, level: masterLevel.mono,
+                         name: "Master", pct: masterPct, level: masterLevel,
                          muted: masterMuted)
             setTitleIfChanged("", context: ctx)
         case .deviceDial:
@@ -645,6 +666,34 @@ final class ActionRouter {
         }
         lastDialFeedback[ctx] = now
         return false
+    }
+
+    private func shouldRefreshKeyMeter(context ctx: String, binding b: Binding) -> Bool {
+        guard !b.isEncoder else { return false }
+        let style = keyStyle(b)
+        let level: StereoLevel
+        let muted: Bool
+        switch b.kind {
+        case .device:
+            guard let mixID = b.settings["mix"] as? String, let info = mixes[mixID] else { return false }
+            muted = info.muted
+            level = levels[mixID] ?? Self.silentStereo
+        case .master:
+            muted = masterMuted
+            level = masterLevel
+        default:
+            return false
+        }
+        let sig = Self.keyMeterSignature(style: style, level: level, muted: muted)
+        guard keyMeterSig[ctx] != sig else { return false }
+        keyMeterSig[ctx] = sig
+        return true
+    }
+
+    private func setStateIfChanged(_ state: Int, context ctx: String) {
+        guard keyStateSig[ctx] != state else { return }
+        keyStateSig[ctx] = state
+        elgato.setState(state, context: ctx)
     }
 
     /// Title = the user's emoji for the shown device (centered, no background), with
@@ -692,21 +741,58 @@ final class ActionRouter {
         return chars.isEmpty ? "?" : String(chars).uppercased()
     }
 
+    private struct KeyRenderInput {
+        let style: KeyStyleImage.KeyStyle
+        let glyph: KeyImage.Glyph
+        let monogram: String
+        let accent: NSColor
+        let colorSig: String
+        let name: String
+        let pct: Int
+        let level: StereoLevel
+        let muted: Bool
+    }
+
     private func pushKeyImage(_ ctx: String, style: KeyStyleImage.KeyStyle,
                               glyph: KeyImage.Glyph, monogram: String, accent: NSColor,
-                              colorSig: String, name: String, pct: Int, level: Float, muted: Bool) {
-        let level = Self.levelFraction(level)
-        let levelStep = Self.keyLevelSignature(style: style, level: level, muted: muted)
-        let sig = [
-            styleSignature(style), glyphSignature(glyph), monogram, colorSig,
-            name, "\(pct)", "\(levelStep)", muted ? "m" : "u"
-        ].joined(separator: "|")
+                              colorSig: String, name: String, pct: Int, level: StereoLevel, muted: Bool) {
+        let input = KeyRenderInput(style: style, glyph: glyph, monogram: monogram,
+                                   accent: accent, colorSig: colorSig, name: name,
+                                   pct: pct, level: level, muted: muted)
+        let levelStep = Self.keyMeterSignature(style: input.style, level: input.level, muted: input.muted)
+        keyMeterSig[ctx] = levelStep
+        let sig = keyImageSignature(input, levelStep: levelStep)
         guard keyImageSig[ctx] != sig else { return }
         keyImageSig[ctx] = sig
-        let img = KeyStyleImage.render(
-            style: style, glyph: glyph, monogram: monogram, accent: accent,
-            name: name, pct: pct, level: level, muted: muted)
+        let img = KeyStyleImage.renderOptimized(
+            style: input.style, glyph: input.glyph, monogram: input.monogram, accent: input.accent,
+            name: input.name, pct: input.pct, level: Self.levelFraction(input.level.mono),
+            leftLevel: Self.levelFraction(input.level.left),
+            rightLevel: Self.levelFraction(input.level.right), muted: input.muted)
         elgato.setImage(img, context: ctx)
+    }
+
+    private func keyImageSignature(_ input: KeyRenderInput, levelStep: String) -> String {
+        [
+            Self.styleSignature(input.style), glyphSignature(input.glyph), input.monogram,
+            input.colorSig, input.name, "\(input.pct)", levelStep, input.muted ? "m" : "u"
+        ].joined(separator: "|")
+    }
+
+    private struct DialRenderInput {
+        let style: KeyStyleImage.KeyStyle
+        let glyph: KeyImage.Glyph
+        let name: String
+        let pct: Int
+        let muted: Bool
+        let level: StereoLevel
+        let peak: StereoPeak?
+        let monogram: String
+        let accent: NSColor
+        let colorSig: String
+        let styleKey: String
+
+        var valueText: String { muted ? "MUTED" : "\(pct)%" }
     }
 
     /// Pushes one LCD frame. All three encoder LCD styles use a full-canvas pixmap
@@ -715,101 +801,125 @@ final class ActionRouter {
                                   name: String, pct: Int, muted: Bool, level: StereoLevel,
                                   peak: StereoPeak?,
                                   monogram: String, accent: NSColor, colorSig: String) {
+        let style = dialStyle(b)
+        let input = DialRenderInput(style: style, glyph: glyph, name: name,
+                                    pct: pct, muted: muted, level: level, peak: peak,
+                                    monogram: monogram, accent: accent, colorSig: colorSig,
+                                    styleKey: Self.styleSignature(style))
         var p: [String: Any] = [
-            "title": name,
-            "value": muted ? "MUTED" : "\(pct)%",
-            "slider": pct,
-            "meter": muted ? 0 : Self.levelPercent(level.mono),
+            "title": input.name,
+            "value": input.valueText,
+            "slider": input.pct,
+            "meter": input.muted ? 0 : Self.levelPercent(input.level.mono),
         ]
-        let lcdStyle = dialStyle(b)
-        let styleKey = styleSignature(lcdStyle)
-        let iconSig = glyphSignature(glyph) + (muted ? "|m" : "")
+        let iconSig = dialIconSignature(input)
         var staticSig = ""
         var meterSig = ""
         var feedbackChanged = false
-        switch lcdStyle {
+        switch input.style {
         case .retro:
             lcdMeterSig[ctx] = nil
-            staticSig = [
-                styleKey, name, monogram, "\(pct)", muted ? "m" : "u",
-                glyphSignature(glyph), colorSig
-            ].joined(separator: "|")
+            staticSig = dialStaticSignature(input)
             if lcdStaticSig[ctx] != staticSig {
                 lcdStaticSig[ctx] = staticSig
                 feedbackChanged = true
                 p["canvas"] = RetroMeterDrawing.renderRetroLCDStatic(
-                    name: name, glyph: glyph, monogram: monogram, accent: accent,
-                    pct: pct, muted: muted) ?? ""
+                    name: input.name, glyph: input.glyph, monogram: input.monogram,
+                    accent: input.accent, pct: input.pct, muted: input.muted) ?? ""
             }
             let needleStep = RetroMeterDrawing.retroLCDLevelNeedleStep(
-                level: Self.levelFraction(level.mono), muted: muted)
-            let needleSig = "\(needleStep)|\(muted ? "m" : "u")"
+                level: Self.levelFraction(input.level.mono), muted: input.muted)
+            let needleSig = "\(needleStep)|\(input.muted ? "m" : "u")"
             if retroNeedleSig[ctx] != needleSig {
                 retroNeedleSig[ctx] = needleSig
                 meterSig = needleSig
                 feedbackChanged = true
                 p["levelNeedle"] = RetroMeterDrawing.renderRetroLCDLevelNeedleSVG(
-                    step: needleStep, muted: muted)
+                    step: needleStep, muted: input.muted)
             } else {
                 meterSig = needleSig
             }
         case .channel, .meter:
             retroNeedleSig[ctx] = nil
             p["levelNeedle"] = ["enabled": false]
-            staticSig = [
-                styleKey, name, monogram, "\(pct)", muted ? "m" : "u",
-                glyphSignature(glyph), colorSig
-            ].joined(separator: "|")
+            staticSig = dialStaticSignature(input)
             if lcdStaticSig[ctx] != staticSig {
                 lcdStaticSig[ctx] = staticSig
                 feedbackChanged = true
                 p["canvas"] = RetroMeterDrawing.renderLCDStatic(
-                    style: lcdStyle, name: name, glyph: glyph, monogram: monogram,
-                    accent: accent, pct: pct, muted: muted) ?? ""
+                    style: input.style, name: input.name, glyph: input.glyph, monogram: input.monogram,
+                    accent: input.accent, pct: input.pct, muted: input.muted) ?? ""
             }
 
             let leftStep = RetroMeterDrawing.lcdLevelBarStep(
-                level: Self.levelFraction(level.left), muted: muted)
+                level: Self.levelFraction(input.level.left), muted: input.muted)
             let rightStep = RetroMeterDrawing.lcdLevelBarStep(
-                level: Self.levelFraction(level.right), muted: muted)
+                level: Self.levelFraction(input.level.right), muted: input.muted)
             let peakLeftStep = RetroMeterDrawing.lcdLevelBarStep(
-                level: Self.levelFraction(peak?.left ?? level.left), muted: muted)
+                level: Self.levelFraction(input.peak?.left ?? input.level.left), muted: input.muted)
             let peakRightStep = RetroMeterDrawing.lcdLevelBarStep(
-                level: Self.levelFraction(peak?.right ?? level.right), muted: muted)
-            meterSig = "\(styleKey)|\(leftStep)|\(rightStep)|\(peakLeftStep)|\(peakRightStep)|\(muted ? "m" : "u")"
+                level: Self.levelFraction(input.peak?.right ?? input.level.right), muted: input.muted)
+            meterSig = dialMeterSignature(input, leftStep: leftStep, rightStep: rightStep,
+                                          peakLeftStep: peakLeftStep, peakRightStep: peakRightStep)
             if lcdMeterSig[ctx] != meterSig {
                 lcdMeterSig[ctx] = meterSig
                 feedbackChanged = true
-                if lcdStyle == .channel {
+                if input.style == .channel {
                     p["liveMeter"] = RetroMeterDrawing.renderLCDLevelBarSVG(
                         width: 128, height: 17, step: max(leftStep, rightStep),
-                        peakStep: max(peakLeftStep, peakRightStep), muted: muted)
+                        peakStep: max(peakLeftStep, peakRightStep), muted: input.muted)
                 } else {
                     p["leftMeter"] = RetroMeterDrawing.renderLCDLevelBarSVG(
-                        width: 113, height: 13, step: leftStep, peakStep: peakLeftStep, muted: muted)
+                        width: 113, height: 13, step: leftStep,
+                        peakStep: peakLeftStep, muted: input.muted)
                     p["rightMeter"] = RetroMeterDrawing.renderLCDLevelBarSVG(
-                        width: 113, height: 13, step: rightStep, peakStep: peakRightStep, muted: muted)
+                        width: 113, height: 13, step: rightStep,
+                        peakStep: peakRightStep, muted: input.muted)
                 }
             }
         }
         if dialIconSig[ctx] != iconSig {
             dialIconSig[ctx] = iconSig
             feedbackChanged = true
-            let img = KeyImage.render(glyph, muted: muted, tint: true)
+            let img = KeyImage.render(input.glyph, muted: input.muted, tint: true)
             elgato.setImage(img, context: ctx)
             p["icon"] = img ?? ""
         }
-        let feedbackSig = [
-            styleKey, name, muted ? "MUTED" : "\(pct)%",
-            "\(pct)", "\(Self.levelPercent(level.mono))",
-            staticSig, meterSig, iconSig
-        ].joined(separator: "|")
+        let feedbackSig = dialFeedbackSignature(input, staticSig: staticSig,
+                                                meterSig: meterSig, iconSig: iconSig)
         guard feedbackChanged || dialFeedbackSig[ctx] != feedbackSig else { return }
         dialFeedbackSig[ctx] = feedbackSig
         elgato.setFeedback(p, context: ctx)
     }
 
-    private func styleSignature(_ style: KeyStyleImage.KeyStyle) -> String {
+    private func dialStaticSignature(_ input: DialRenderInput) -> String {
+        [
+            input.styleKey, input.name, input.monogram, "\(input.pct)",
+            input.muted ? "m" : "u", glyphSignature(input.glyph), input.colorSig
+        ].joined(separator: "|")
+    }
+
+    private func dialIconSignature(_ input: DialRenderInput) -> String {
+        glyphSignature(input.glyph) + (input.muted ? "|m" : "")
+    }
+
+    private func dialMeterSignature(_ input: DialRenderInput, leftStep: Int, rightStep: Int,
+                                    peakLeftStep: Int, peakRightStep: Int) -> String {
+        [
+            input.styleKey, "\(leftStep)", "\(rightStep)",
+            "\(peakLeftStep)", "\(peakRightStep)", input.muted ? "m" : "u"
+        ].joined(separator: "|")
+    }
+
+    private func dialFeedbackSignature(_ input: DialRenderInput, staticSig: String,
+                                       meterSig: String, iconSig: String) -> String {
+        [
+            input.styleKey, input.name, input.valueText, "\(input.pct)",
+            "\(Self.levelPercent(input.level.mono))", staticSig, meterSig, iconSig
+        ].joined(separator: "|")
+    }
+
+    private static func styleSignature(_ style: KeyStyleImage.KeyStyle) -> String {
         switch style {
         case .channel: return "c"
         case .meter: return "m"

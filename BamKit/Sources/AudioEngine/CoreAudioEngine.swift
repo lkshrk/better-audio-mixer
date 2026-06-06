@@ -84,7 +84,6 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         var sourceFormatDriftSamples: [String: Int] = [:]
         var lastSourceFrames: [String: Int] = [:]
         var sourceStaleSamples: [String: Int] = [:]
-        var expectedSilentSamples: [String: Int] = [:]
     }
 
     private static let healthSilenceDB: Float = -72
@@ -478,7 +477,6 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         }
 
         var sourceFrameBad: [String] = []
-        var expectedSilentBad: [String] = []
         var activeInputWithGain = false
         for sourceID in expectedSourceIDs {
             guard let s = sourceHealthByID[sourceID] else { continue }
@@ -494,26 +492,14 @@ public actor CoreAudioEngine: AudioEngineProtocol {
                 sourceFrameBad.append(sourceID)
             }
 
-            if s.meter <= Self.healthSilenceDB {
-                state.expectedSilentSamples[sourceID, default: 0] += 1
-            } else {
-                state.expectedSilentSamples[sourceID] = 0
+            if s.meter > Self.healthSilenceDB {
                 activeInputWithGain = true
-            }
-            if state.expectedSilentSamples[sourceID, default: 0] >= 5 {
-                expectedSilentBad.append(sourceID)
             }
         }
 
         if !sourceFrameBad.isEmpty {
             bamLog("router health failed: source tap stopped advancing for \(sourceFrameBad.sorted().joined(separator: ",")); rebuilding tap(s)", level: .error)
             recoverRouterAfterHealthFailure(signature: signature, reason: "source tap stalled", resetSourceIDs: Set(sourceFrameBad))
-            return false
-        }
-
-        if !expectedSilentBad.isEmpty {
-            bamLog("router health failed: expected source audio missing for \(expectedSilentBad.sorted().joined(separator: ",")); rebuilding tap(s)", level: .error)
-            recoverRouterAfterHealthFailure(signature: signature, reason: "expected source silent", resetSourceIDs: Set(expectedSilentBad))
             return false
         }
 

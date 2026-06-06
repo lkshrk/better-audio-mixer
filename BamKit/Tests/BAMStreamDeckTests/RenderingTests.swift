@@ -69,6 +69,103 @@ struct KeyStyleImageTests {
         #expect(uri?.hasPrefix("data:image/png;base64,") == true)
     }
 
+    @Test(arguments: [KeyStyleImage.KeyStyle.channel, .meter])
+    func optimizedSegmentedButtonStylesRenderSVG(style: KeyStyleImage.KeyStyle) {
+        let uri = KeyStyleImage.renderOptimized(style: style, glyph: .symbol("speaker.wave.2.fill"),
+                                                monogram: "GA", accent: .systemBlue,
+                                                name: "Game", pct: 73, level: 0.6,
+                                                leftLevel: 0.4, rightLevel: 0.8,
+                                                muted: false)
+        #expect(uri?.hasPrefix("data:image/svg+xml;base64,") == true)
+        let svg = svgText(fromDataURI: uri)
+        #expect(svg?.contains("<svg width=\"144\" height=\"144\"") == true)
+        #expect(svg?.contains("Game") == true)
+        if style == .channel {
+            #expect(svg?.contains("x=\"14.00\" y=\"44.00\" width=\"112.00\" height=\"50.00\"") == true)
+        }
+    }
+
+    @Test func optimizedSegmentedEmojiIconsStayTinted() {
+        let uri = KeyStyleImage.renderOptimized(style: .channel, glyph: .emoji("🌐"),
+                                                monogram: "BR", accent: .systemBlue,
+                                                name: "Browser", pct: 60, level: 0.5,
+                                                muted: false)
+        let svg = svgText(fromDataURI: uri)
+        #expect(uri?.hasPrefix("data:image/svg+xml;base64,") == true)
+        #expect(svg?.contains("data:image/png;base64,") == true)
+        #expect(svg?.contains("🌐") == false)
+    }
+
+    @Test func optimizedChannelVolumeNumberUsesRetroPosition() {
+        let uri = KeyStyleImage.renderOptimized(style: .channel, glyph: .symbol("speaker.wave.2.fill"),
+                                                monogram: "VO", accent: .systemCyan,
+                                                name: "Voice", pct: 75, level: 0.5,
+                                                muted: false)
+        let svg = svgText(fromDataURI: uri)
+        #expect(svg?.contains("<image href=\"data:image/png;base64,") == true)
+        #expect(svg?.contains("x=\"14.00\" y=\"44.00\" width=\"112.00\" height=\"50.00\"") == true)
+    }
+
+    @Test func optimizedSegmentedSymbolsRenderAtRuntime() {
+        let uri = KeyStyleImage.renderOptimized(style: .meter, glyph: .symbol("bolt.fill"),
+                                                monogram: "BO", accent: .systemYellow,
+                                                name: "Bolt", pct: 60, level: 0.5,
+                                                muted: false)
+        let svg = svgText(fromDataURI: uri)
+        #expect(uri?.hasPrefix("data:image/svg+xml;base64,") == true)
+        #expect(svg?.contains("data:image/png;base64,") == true)
+        #expect(svg?.contains(">BO<") == false)
+    }
+
+    @Test func optimizedSegmentedRuntimeIconsAreStableAcrossRenders() {
+        let first = KeyStyleImage.renderOptimized(style: .channel, glyph: .symbol("bolt.fill"),
+                                                  monogram: "BO", accent: .systemYellow,
+                                                  name: "Bolt", pct: 61, level: 0.5,
+                                                  muted: false)
+        let second = KeyStyleImage.renderOptimized(style: .channel, glyph: .symbol("bolt.fill"),
+                                                   monogram: "BO", accent: .systemYellow,
+                                                   name: "Bolt", pct: 61, level: 0.5,
+                                                   muted: false)
+        #expect(first == second)
+    }
+
+    @Test func optimizedSegmentedInvalidSymbolFallsBackToMonogram() {
+        let uri = KeyStyleImage.renderOptimized(style: .meter, glyph: .symbol("not.a.real.symbol"),
+                                                monogram: "NA", accent: .systemYellow,
+                                                name: "Bad", pct: 60, level: 0.5,
+                                                muted: false)
+        let svg = svgText(fromDataURI: uri)
+        #expect(uri?.hasPrefix("data:image/svg+xml;base64,") == true)
+        #expect(svg?.contains("data:image/png;base64,") == false)
+        #expect(svg?.contains(">NA<") == true)
+    }
+
+    @Test func optimizedRetroButtonStyleKeepsPNG() {
+        let uri = KeyStyleImage.renderOptimized(style: .retro, glyph: .symbol("speaker.wave.2.fill"),
+                                                monogram: "GA", accent: .systemBlue,
+                                                name: "Game", pct: 73, level: 0.6,
+                                                muted: false)
+        #expect(uri?.hasPrefix("data:image/png;base64,") == true)
+    }
+
+    @Test(arguments: [KeyStyleImage.KeyStyle.channel, .meter, .retro])
+    func styledButtonImagesLeaveStreamDeckChromeMargin(style: KeyStyleImage.KeyStyle) {
+        let uri = KeyStyleImage.render(style: style, glyph: .emoji("🌐"), monogram: "BR",
+                                       accent: .systemBlue, name: "Browser",
+                                       pct: 60, level: 0.62, muted: false)
+        guard let rep = bitmap(fromDataURI: uri) else {
+            #expect(Bool(false), "Styled key render should decode as PNG")
+            return
+        }
+
+        #expect(rep.pixelsWide == 144)
+        #expect(rep.pixelsHigh == 144)
+        for point in [(0, 0), (4, 4), (139, 139), (143, 143)] {
+            let alpha = rep.colorAt(x: point.0, y: point.1)?.alphaComponent ?? 0
+            #expect(alpha < 0.1)
+        }
+    }
+
     @Test(arguments: [KeyStyleImage.KeyStyle.channel, .meter, .retro])
     func rendersMutedVariant(style: KeyStyleImage.KeyStyle) {
         let uri = KeyStyleImage.render(style: style, monogram: "M", accent: .systemPurple,

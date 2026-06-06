@@ -12,7 +12,7 @@ INSTALL_DIR := /Applications
 # on launch and a stuck-high level has hurt before — keep this low.
 SAFE_VOLUME := 12
 
-.PHONY: all generate build test install release clean
+.PHONY: all generate build test install install-streamdeck install-streamdeck-fast release clean
 
 all: build
 
@@ -43,6 +43,14 @@ install: generate
 	rm -rf "$(INSTALL_DIR)/bam.app"
 	cp -R "$(RELEASE_APP)" "$(INSTALL_DIR)/bam.app"
 	open "$(INSTALL_DIR)/bam.app"
+
+## install-streamdeck: test, build, install, and restart local Stream Deck plugin
+install-streamdeck:
+	scripts/install-streamdeck-plugin.sh
+
+## install-streamdeck-fast: build, install, and restart local Stream Deck plugin without tests
+install-streamdeck-fast:
+	scripts/install-streamdeck-plugin.sh --skip-tests
 
 ## release: bump version, commit, tag (push triggers the signed Release workflow)
 ##   usage: make release VERSION=0.5.0

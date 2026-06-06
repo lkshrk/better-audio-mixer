@@ -11,7 +11,7 @@ enum RetroMeterDrawing {
     static func drawKeyFrame(side: CGFloat, name: String, glyph: KeyImage.Glyph? = nil,
                              monogram: String, accent: NSColor,
                              pct: Int, level: Float, muted: Bool) {
-        drawFace(rect: NSRect(x: 14, y: 20, width: side - 28, height: side - 44),
+        drawFace(rect: NSRect(x: 6, y: 2, width: side - 12, height: 80),
                  cornerRadius: 8, glyph: glyph, label: monogram, name: name, pct: pct,
                  level: level, muted: muted, accent: accent, compact: true)
     }
@@ -133,16 +133,13 @@ enum RetroMeterDrawing {
         NSRect(x: 0, y: 0, width: width, height: height).fill()
         switch style {
         case .channel:
-            drawChannelLCD(name: name, glyph: glyph, monogram: monogram, accent: accent,
-                           pct: pct, level: level, muted: muted,
+            drawChannelLCD(name: name, accent: accent, pct: pct, level: level, muted: muted,
                            includeLevelMeter: includeLiveMeters)
         case .meter:
-            drawMeterFocusLCD(name: name, glyph: glyph, monogram: monogram, accent: accent,
-                              pct: pct, level: level, muted: muted,
+            drawMeterFocusLCD(name: name, pct: pct, level: level, muted: muted,
                               includeLevelMeter: includeLiveMeters)
         case .retro:
-            drawLCDReferencePanel(name: name, glyph: glyph, monogram: monogram, accent: accent,
-                                  pct: pct, level: level, muted: muted,
+            drawLCDReferencePanel(name: name, accent: accent, pct: pct, level: level, muted: muted,
                                   includeLevelNeedle: includeLiveMeters)
         }
 
@@ -153,37 +150,32 @@ enum RetroMeterDrawing {
         return "data:image/png;base64," + png.base64EncodedString()
     }
 
-    private static func drawChannelLCD(name: String, glyph: KeyImage.Glyph?, monogram: String, accent: NSColor,
+    private static func drawChannelLCD(name: String, accent: NSColor,
                                        pct: Int, level: Float, muted: Bool,
                                        includeLevelMeter: Bool) {
-        drawLabel(shortLCDName(name), rect: NSRect(x: 16, y: 68, width: 104, height: 18),
-                  size: 13, color: .white, align: .left)
-        drawLabel(muted ? "MUTED" : "\(pct)%",
-                  rect: NSRect(x: 126, y: 62, width: 58, height: 25),
-                  size: muted ? 12 : 21, color: muted ? mutedRed : .white, align: .right)
-
+        drawLCDHeader(name: name, pct: pct, muted: muted)
         drawLevelBar(rect: NSRect(x: 56, y: 40, width: 128, height: 17),
                      level: level, muted: muted, includeFill: includeLevelMeter)
         drawVolumeRail(rect: NSRect(x: 56, y: 20, width: 128, height: 8), pct: pct, muted: muted, accent: accent)
     }
 
-    private static func drawMeterFocusLCD(name: String, glyph: KeyImage.Glyph?, monogram: String, accent: NSColor,
-                                          pct: Int, level: Float, muted: Bool,
+    private static func drawMeterFocusLCD(name: String, pct: Int, level: Float, muted: Bool,
                                           includeLevelMeter: Bool) {
-        drawLabel(shortLCDName(name), rect: NSRect(x: 16, y: 68, width: 104, height: 18),
-                  size: 13, color: .white, align: .left)
-        drawLabel(muted ? "MUTED" : "\(pct)%",
-                  rect: NSRect(x: 126, y: 62, width: 58, height: 25),
-                  size: muted ? 12 : 21, color: muted ? mutedRed : .white, align: .right)
-
+        drawLCDHeader(name: name, pct: pct, muted: muted)
         drawLevelBar(rect: NSRect(x: 71, y: 41, width: 113, height: 13),
                      level: level, muted: muted, includeFill: includeLevelMeter)
         drawMeterSideLabel("L", rect: NSRect(x: 54, y: 41, width: 15, height: 13))
         drawLevelBar(rect: NSRect(x: 71, y: 21, width: 113, height: 13),
                      level: level, muted: muted, includeFill: includeLevelMeter)
         drawMeterSideLabel("R", rect: NSRect(x: 54, y: 21, width: 15, height: 13))
-        _ = glyph
-        _ = monogram
+    }
+
+    private static func drawLCDHeader(name: String, pct: Int, muted: Bool) {
+        drawLabel(shortLCDName(name), rect: NSRect(x: 16, y: 68, width: 104, height: 18),
+                  size: 13, color: .white, align: .left)
+        drawLabel(muted ? "MUTED" : "\(pct)%",
+                  rect: NSRect(x: 126, y: 62, width: 58, height: 25),
+                  size: muted ? 12 : 21, color: muted ? mutedRed : .white, align: .right)
     }
 
     private static func drawStereoMeters(left: NSRect, right: NSRect, level: Float, muted: Bool) {
@@ -246,16 +238,10 @@ enum RetroMeterDrawing {
                      xRadius: rect.height / 2, yRadius: rect.height / 2).fill()
     }
 
-    private static func drawLCDReferencePanel(name: String, glyph: KeyImage.Glyph?, monogram: String, accent: NSColor,
+    private static func drawLCDReferencePanel(name: String, accent: NSColor,
                                               pct: Int, level: Float, muted: Bool,
                                               includeLevelNeedle: Bool) {
-        _ = glyph
-        _ = monogram
-        drawLabel(shortLCDName(name), rect: NSRect(x: 16, y: 68, width: 104, height: 18),
-                  size: 13, color: .white, align: .left)
-        drawLabel(muted ? "MUTED" : "\(pct)%",
-                  rect: NSRect(x: 126, y: 62, width: 58, height: 25),
-                  size: muted ? 12 : 21, color: muted ? mutedRed : .white, align: .right)
+        drawLCDHeader(name: name, pct: pct, muted: muted)
 
         let dial = NSRect(x: 18, y: 5, width: 164, height: 56)
         let center = NSPoint(x: dial.midX, y: dial.minY - 9)
@@ -378,40 +364,87 @@ enum RetroMeterDrawing {
                                  label: String, name: String,
                                  pct: Int, level: Float, muted: Bool, accent: NSColor,
                                  compact: Bool) {
-        NSColor(calibratedWhite: 0.12, alpha: 1).setFill()
-        NSBezierPath(roundedRect: rect, xRadius: cornerRadius, yRadius: cornerRadius).fill()
-        NSColor(calibratedWhite: 0.26, alpha: 1).setStroke()
-        let border = NSBezierPath(roundedRect: rect.insetBy(dx: 1, dy: 1),
-                                  xRadius: cornerRadius, yRadius: cornerRadius)
-        border.lineWidth = 1
-        border.stroke()
+        if !compact {
+            NSColor(calibratedWhite: 0.12, alpha: 1).setFill()
+            NSBezierPath(roundedRect: rect, xRadius: cornerRadius, yRadius: cornerRadius).fill()
+            NSColor(calibratedWhite: 0.26, alpha: 1).setStroke()
+            let border = NSBezierPath(roundedRect: rect.insetBy(dx: 1, dy: 1),
+                                      xRadius: cornerRadius, yRadius: cornerRadius)
+            border.lineWidth = 1
+            border.stroke()
+        }
 
-        let center = NSPoint(x: rect.midX, y: rect.minY + rect.height * 0.20)
-        let radius = rect.width * (compact ? 0.42 : 0.38)
-        drawTicks(center: center, radius: radius, muted: muted)
+        let center = NSPoint(x: rect.midX,
+                             y: compact ? rect.minY + 3 : rect.minY + rect.height * 0.20)
+        let radius = rect.width * 0.38
+        if compact {
+            let radiusX = rect.width * 0.54
+            let radiusY = rect.height * 0.48
+            drawCompactArc(center: center, radiusX: radiusX, radiusY: radiusY, muted: muted)
+            drawCompactTicks(center: center, radiusX: radiusX, radiusY: radiusY, muted: muted)
+        } else {
+            drawTicks(center: center, radius: radius, muted: muted)
+        }
 
-        let levelAngle = angle(for: muted ? 0 : CGFloat(max(0, min(1, level))))
-        drawNeedle(center: center, radius: radius * 0.92, angle: levelAngle,
-                   color: NSColor(calibratedWhite: 0.86, alpha: 1), width: compact ? 2.2 : 2)
+        let levelFraction = muted ? 0 : CGFloat(max(0, min(1, level)))
+        let levelAngle = compact ? compactAngle(for: levelFraction) : angle(for: levelFraction)
+        if compact {
+            drawNeedle(center: center, radiusX: rect.width * 0.50, radiusY: rect.height * 0.44,
+                       angle: levelAngle, color: NSColor(calibratedWhite: 0.86, alpha: 1),
+                       width: 2.2)
+        } else {
+            drawNeedle(center: center, radius: radius * 0.92, angle: levelAngle,
+                       color: NSColor(calibratedWhite: 0.86, alpha: 1), width: 2)
+        }
 
-        let volumeAngle = angle(for: CGFloat(max(0, min(100, pct))) / 100)
-        drawNeedle(center: center, radius: radius * 0.72, angle: volumeAngle,
-                   color: muted ? mutedRed : NSColor(calibratedRed: 1, green: 0.18, blue: 0.14, alpha: 1),
-                   width: compact ? 2.8 : 2.4)
+        if !compact {
+            let volumeAngle = angle(for: CGFloat(max(0, min(100, pct))) / 100)
+            drawNeedle(center: center, radius: radius * 0.72, angle: volumeAngle,
+                       color: muted ? mutedRed : NSColor(calibratedRed: 1, green: 0.18, blue: 0.14, alpha: 1),
+                       width: 2.4)
+        }
 
         NSColor(calibratedWhite: 0.04, alpha: 1).setFill()
         NSBezierPath(ovalIn: NSRect(x: center.x - 5, y: center.y - 5, width: 10, height: 10)).fill()
 
-        let iconRect = NSRect(x: rect.minX + 8, y: rect.maxY - 24, width: 16, height: 16)
-        if glyph == nil || !drawGlyph(glyph!, in: iconRect, tintSymbols: true) {
-            drawLabel(label, rect: NSRect(x: rect.minX + 8, y: rect.maxY - 22, width: 34, height: 15),
-                      size: compact ? 9 : 8, color: muted ? mutedRed : accent, align: .left)
+        if !compact {
+            let iconRect = NSRect(x: rect.minX + 12, y: rect.maxY - 31, width: 22, height: 22)
+            if glyph == nil || !drawGlyph(glyph!, in: iconRect, tintSymbols: true) {
+                drawLabel(label, rect: NSRect(x: rect.minX + 12, y: rect.maxY - 27, width: 34, height: 15),
+                          size: 8, color: muted ? mutedRed : accent, align: .left)
+            }
+            drawLabel(shortName(name), rect: NSRect(x: rect.minX + 42, y: rect.maxY - 26,
+                                                    width: rect.width - 82, height: 15),
+                      size: 9, color: .white, align: .left)
         }
-        drawLabel(shortName(name), rect: NSRect(x: rect.minX + 42, y: rect.maxY - 22,
-                                                width: rect.width - 50, height: 15),
-                  size: compact ? 10 : 9, color: .white, align: .left)
-        if compact {
-            drawReadout(x: rect.maxX - 42, y: rect.minY + 12, pct: pct, muted: muted)
+    }
+
+    private static func drawCompactArc(center: NSPoint, radiusX: CGFloat, radiusY: CGFloat, muted: Bool) {
+        let arc = NSBezierPath()
+        for i in 0...48 {
+            let frac = CGFloat(i) / 48
+            let p = point(center: center, radiusX: radiusX - 16, radiusY: radiusY - 10,
+                          angle: compactAngle(for: frac))
+            if i == 0 { arc.move(to: p) } else { arc.line(to: p) }
+        }
+        arc.lineWidth = 2.0
+        NSColor(calibratedWhite: muted ? 0.24 : 0.34, alpha: 1).setStroke()
+        arc.stroke()
+    }
+
+    private static func drawCompactTicks(center: NSPoint, radiusX: CGFloat, radiusY: CGFloat, muted: Bool) {
+        for i in 0...10 {
+            let frac = CGFloat(i) / 10
+            let angle = compactAngle(for: frac)
+            let tick = i % 5 == 0 ? 9.0 : 6.0
+            let outer = point(center: center, radiusX: radiusX, radiusY: radiusY, angle: angle)
+            let inner = point(center: center, radiusX: radiusX - tick, radiusY: radiusY - tick, angle: angle)
+            let path = NSBezierPath()
+            path.move(to: inner)
+            path.line(to: outer)
+            path.lineWidth = i % 5 == 0 ? 1.4 : 1
+            tickColor(frac, muted: muted).setStroke()
+            path.stroke()
         }
     }
 
@@ -464,6 +497,10 @@ enum RetroMeterDrawing {
             let str = NSAttributedString(string: trimmed, attributes: [.font: font])
             let size = str.size()
             str.draw(at: NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2))
+            if tintSymbols {
+                NSColor.white.set()
+                rect.fill(using: .sourceAtop)
+            }
             return true
         case .symbol(let name):
             guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: nil) else {
@@ -485,12 +522,12 @@ enum RetroMeterDrawing {
         }
     }
 
-    private static func drawReadout(x: CGFloat, y: CGFloat, pct: Int, muted: Bool) {
-        let value = muted ? "MUTED" : "\(pct)"
-        let unit = muted ? "" : "dB"
-        drawLabel(value, rect: NSRect(x: x, y: y, width: 34, height: 22),
-                  size: muted ? 9 : 20, color: muted ? mutedRed : .white, align: .right)
-        if !unit.isEmpty {
+    private static func drawReadout(x: CGFloat, y: CGFloat, pct: Int, muted: Bool, showPercent: Bool = false) {
+        let value = muted ? "MUTED" : showPercent ? "\(pct)%" : "\(pct)"
+        let unit = muted ? "" : showPercent ? "%" : "dB"
+        drawLabel(value, rect: NSRect(x: x, y: y, width: showPercent ? 44 : 34, height: 22),
+                  size: muted ? 9 : showPercent ? 18 : 20, color: muted ? mutedRed : .white, align: .right)
+        if !unit.isEmpty && !showPercent {
             drawLabel(unit, rect: NSRect(x: x, y: y - 14, width: 34, height: 12),
                       size: 8, color: NSColor(calibratedWhite: 0.78, alpha: 1), align: .right)
         }
@@ -501,8 +538,9 @@ enum RetroMeterDrawing {
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = align
         paragraph.lineBreakMode = .byTruncatingTail
+        let font = NSFont.systemFont(ofSize: size, weight: .bold)
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: size, weight: .bold),
+            .font: font,
             .foregroundColor: color,
             .paragraphStyle: paragraph
         ]
@@ -510,7 +548,7 @@ enum RetroMeterDrawing {
     }
 
     private static func drawMeterSideLabel(_ text: String, rect: NSRect) {
-        let font = NSFont.monospacedSystemFont(ofSize: 10, weight: .bold)
+        let font = NSFont.systemFont(ofSize: 10, weight: .bold)
         let attrs: [NSAttributedString.Key: Any] = [
             .font: font,
             .foregroundColor: NSColor(calibratedWhite: 0.70, alpha: 1)
@@ -531,6 +569,10 @@ enum RetroMeterDrawing {
 
     private static func angle(for fraction: CGFloat) -> CGFloat {
         (-145 + 110 * max(0, min(1, fraction))) * .pi / 180
+    }
+
+    private static func compactAngle(for fraction: CGFloat) -> CGFloat {
+        (145 - 110 * max(0, min(1, fraction))) * .pi / 180
     }
 
     private static func lcdAngle(for fraction: CGFloat) -> CGFloat {
