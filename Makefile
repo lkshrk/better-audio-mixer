@@ -49,8 +49,9 @@ install: generate
 release:
 	@test -n "$(VERSION)" || { echo "usage: make release VERSION=0.5.0"; exit 1; }
 	sed -i '' -E 's/MARKETING_VERSION: "[^"]*"/MARKETING_VERSION: "$(VERSION)"/' project.yml
+	sed -i '' -E 's/"Version": "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"/"Version": "$(VERSION).0"/' StreamDeck/me.harke.better-audio-mixer.sdPlugin/manifest.json
 	$(MAKE) generate
-	git add project.yml bam.xcodeproj App/Info.plist
+	git add project.yml bam.xcodeproj App/Info.plist StreamDeck/me.harke.better-audio-mixer.sdPlugin/manifest.json
 	git commit -m "Release v$(VERSION)"
 	git tag -a "v$(VERSION)" -m "bam v$(VERSION)"
 	@echo "Tagged v$(VERSION). Push to release: git push origin main --follow-tags"
