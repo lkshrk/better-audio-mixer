@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/layout.json",
+  "id": "channel",
+  "items": [
+    { "key": "canvas", "type": "pixmap", "rect": [0, 0, 200, 100], "zOrder": 10 },
+    { "key": "liveMeter", "type": "pixmap", "rect": [56, 43, 128, 17], "zOrder": 15 },
+    { "key": "icon", "type": "pixmap", "rect": [8, 37, 48, 48], "zOrder": 20 }
+  ]
+}

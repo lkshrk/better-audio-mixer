@@ -31,7 +31,7 @@
         "Encoder"
       ],
       "Encoder": {
-        "layout": "layouts/band.json",
+        "layout": "layouts/channel.json",
         "TriggerDescription": {
           "Rotate": "Adjust volume",
           "Push": "Mute"
@@ -59,7 +59,7 @@
         "Encoder"
       ],
       "Encoder": {
-        "layout": "layouts/band.json",
+        "layout": "layouts/channel.json",
         "TriggerDescription": {
           "Rotate": "Adjust master",
           "Push": "Mute"

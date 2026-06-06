@@ -43,26 +43,72 @@ final class ActionRouter {
     }
 
     private struct MixInfo { var name: String; var emoji: String; var pct: Int; var muted: Bool }
+    private struct StereoLevel { var mono: Float; var left: Float; var right: Float }
+    struct StereoPeak: Equatable { var left: Float; var right: Float }
 
-    private let elgato: ElgatoConnection
+    struct RollingPeakWindow {
+        private struct Sample { var left: Float; var right: Float; var at: TimeInterval }
+
+        private let seconds: TimeInterval
+        private let floor: Float
+        private var samples: [Sample] = []
+        private var firstLiveSample = 0
+
+        init(seconds: TimeInterval, floor: Float) {
+            self.seconds = seconds
+            self.floor = floor
+        }
+
+        mutating func append(left: Float, right: Float, at now: TimeInterval) -> StereoPeak {
+            samples.append(Sample(left: left, right: right, at: now))
+            let cutoff = now - seconds
+            while firstLiveSample < samples.count, samples[firstLiveSample].at < cutoff {
+                firstLiveSample += 1
+            }
+            if firstLiveSample > 64, firstLiveSample * 2 > samples.count {
+                samples.removeFirst(firstLiveSample)
+                firstLiveSample = 0
+            }
+            return peak
+        }
+
+        var peak: StereoPeak {
+            samples.dropFirst(firstLiveSample).reduce(StereoPeak(left: floor, right: floor)) { peak, sample in
+                StereoPeak(left: max(peak.left, sample.left),
+                           right: max(peak.right, sample.right))
+            }
+        }
+    }
+
+    private static let silentStereo = StereoLevel(mono: meterFloorDB, left: meterFloorDB, right: meterFloorDB)
+    private static let peakWindowSeconds: TimeInterval = 5
+    private static let dialFeedbackInterval: TimeInterval = 1.0 / 40.0
+
+    private let elgato: ElgatoCommandSink
     /// Sink for frames headed to BAM (cmd / listMixes).
     var sendToBAM: (([String: Any]) -> Void)?
 
     private var contexts: [String: Binding] = [:]
     private var mixes: [String: MixInfo] = [:]
-    private var levels: [String: Float] = [:]
+    private var levels: [String: StereoLevel] = [:]
+    private var peakWindows: [String: RollingPeakWindow] = [:]
     private var masterPct = 0
     private var masterMuted = false
-    private var masterLevel: Float = meterFloorDB
+    private var masterLevel = StereoLevel(mono: meterFloorDB, left: meterFloorDB, right: meterFloorDB)
+    private var masterPeakWindow = RollingPeakWindow(seconds: peakWindowSeconds, floor: meterFloorDB)
     private var masterIcon = "hifispeaker.fill"
     /// Last icon signature pushed to each dial's LCD, so the (expensive) base64
     /// pixmap is only re-sent when the glyph or mute state actually changes —
     /// meter/value updates stay tiny and can run at full frame rate.
     private var dialIconSig: [String: String] = [:]
-    /// Last wall-clock time the (full-PNG) styled keys were refreshed from a meter
-    /// frame. Encoders run unthrottled, but each styled key ships a fresh ~5KB base64
-    /// image per refresh, so keys are capped to ~10fps.
-    private var lastKeyMeter: TimeInterval = 0
+    private var lcdStaticSig: [String: String] = [:]
+    private var lcdMeterSig: [String: String] = [:]
+    private var retroNeedleSig: [String: String] = [:]
+    private var keyImageSig: [String: String] = [:]
+    private var lastDialFeedback: [String: TimeInterval] = [:]
+    private var dialFeedbackSig: [String: String] = [:]
+    private var titleSig: [String: String] = [:]
+    private var colorSigCache: [String: String] = [:]
     private var piAction: String?
     private var piContext: String?
 
@@ -70,10 +116,10 @@ final class ActionRouter {
     /// Ordered hardware outputs from the last `outputs` frame (PI list + toggle targets).
     private var outputs: [OutputInfo] = []
     private var activeOutputUID: String?
-    /// Context whose press issued the pending setOutputDevice — receives the v2 alert.
+    /// Context whose press issued the pending setOutputDevice.
     private var pendingOutputContext: String?
 
-    init(elgato: ElgatoConnection) { self.elgato = elgato }
+    init(elgato: ElgatoCommandSink) { self.elgato = elgato }
 
     // MARK: - Elgato events
 
@@ -81,7 +127,19 @@ final class ActionRouter {
         switch event {
         case "willAppear":          bind(obj)
         case "didReceiveSettings":  bind(obj)
-        case "willDisappear":       if let ctx = obj["context"] as? String { contexts[ctx] = nil; dialIconSig[ctx] = nil }
+        case "willDisappear":
+            if let ctx = obj["context"] as? String {
+                contexts[ctx] = nil
+                dialIconSig[ctx] = nil
+                lcdStaticSig[ctx] = nil
+                lcdMeterSig[ctx] = nil
+                retroNeedleSig[ctx] = nil
+                keyImageSig[ctx] = nil
+                lastDialFeedback[ctx] = nil
+                dialFeedbackSig[ctx] = nil
+                titleSig[ctx] = nil
+                colorSigCache[ctx] = nil
+            }
         case "keyDown":             keyDown(obj)
         case "dialRotate":          dialRotate(obj)
         case "dialDown":            dialPress(obj)
@@ -99,10 +157,18 @@ final class ActionRouter {
         let controller = (payload?["controller"] as? String) ?? "Keypad"
         let kind = Kind(action: action)
         contexts[ctx] = Binding(action: action, kind: kind, settings: settings, controller: controller)
+        dialIconSig[ctx] = nil
+        lcdStaticSig[ctx] = nil
+        lcdMeterSig[ctx] = nil
+        retroNeedleSig[ctx] = nil
+        keyImageSig[ctx] = nil
+        lastDialFeedback[ctx] = nil
+        dialFeedbackSig[ctx] = nil
+        titleSig[ctx] = nil
+        colorSigCache[ctx] = nil
         if controller == "Encoder" {
-            let style = (settings["style"] as? String) ?? "combined"
+            let style = (settings["style"] as? String) ?? "channel"
             elgato.setFeedbackLayout(layoutID(style), context: ctx)
-            dialIconSig[ctx] = nil // layout reset clears the LCD; force icon re-push
         }
         if kind == .output { sendToBAM?(["t": "listOutputs"]) }
         refresh(ctx)
@@ -148,9 +214,11 @@ final class ActionRouter {
 
     private func layoutID(_ style: String) -> String {
         switch style {
-        case "slider": return "layouts/slider.json"
-        case "meter":  return "layouts/meter.json"
-        default:       return "layouts/band.json"
+        case "channel", "combined", "slider": return "layouts/channel.json"
+        case "meter", "bars": return "layouts/meter-focus.json"
+        case "retro":  return "layouts/retro.json"
+        case "radial": return "layouts/retro.json"
+        default:       return "layouts/channel.json"
         }
     }
 
@@ -184,8 +252,33 @@ final class ActionRouter {
         return accentPalette[Int(h % UInt64(accentPalette.count))]
     }
 
+    static func normalizedVisualStyle(_ rawValue: String?) -> KeyStyleImage.KeyStyle {
+        switch rawValue ?? "channel" {
+        case "bars":   return .meter
+        case "radial": return .retro
+        default:
+            return KeyStyleImage.KeyStyle(rawValue: rawValue ?? "channel") ?? .channel
+        }
+    }
+
+    static func keyLevelSignature(style: KeyStyleImage.KeyStyle, level: Float, muted: Bool) -> Int {
+        guard !muted else { return 0 }
+        let clamped = max(0, min(1, level))
+        let steps: Float
+        switch style {
+        case .channel: steps = 12
+        case .meter: steps = 18
+        case .retro: steps = 100
+        }
+        return Int((clamped * steps).rounded())
+    }
+
     private func keyStyle(_ b: Binding) -> KeyStyleImage.KeyStyle {
-        KeyStyleImage.KeyStyle(rawValue: (b.settings["keyStyle"] as? String) ?? "meter") ?? .meter
+        Self.normalizedVisualStyle(b.settings["keyStyle"] as? String)
+    }
+
+    private func dialStyle(_ b: Binding) -> KeyStyleImage.KeyStyle {
+        Self.normalizedVisualStyle(b.settings["style"] as? String)
     }
 
     private func keyDown(_ obj: [String: Any]) {
@@ -235,7 +328,7 @@ final class ActionRouter {
     }
 
     /// Computes the target device from the action's mode/A/B settings and issues
-    /// the switch. v2: the server replies `error{unsupported}` and we flash an alert.
+    /// the switch.
     private func outputKeyDown(_ ctx: String, _ s: [String: Any]) {
         let mode = (s["mode"] as? String) ?? "set"
         let a = s["a"] as? String
@@ -311,7 +404,14 @@ final class ActionRouter {
         case "state":   ingestState(obj); cacheMixes(); refreshAll(); sendMixesToPI()
         case "delta":   ingestDelta(obj); cacheMixes()
         case "masterDelta": ingestMasterDelta(obj)
-        case "removed": if let id = obj["mix"] as? String { mixes[id] = nil; levels[id] = nil; refreshAll(); cacheMixes() }
+        case "removed":
+            if let id = obj["mix"] as? String {
+                mixes[id] = nil
+                levels[id] = nil
+                peakWindows[id] = nil
+                refreshAll()
+                cacheMixes()
+            }
         case "meter":   ingestMeter(obj)
         case "mixes":   forwardMixesReply(obj)
         case "outputs": ingestOutputs(obj)
@@ -351,37 +451,48 @@ final class ActionRouter {
         pendingOutputContext = nil
     }
 
-    /// Level-only frame (~12fps). Drives the LCD meter bars on dials at the full
+    /// Level-only frame (~30fps). Drives the LCD meter bars on dials at the full
     /// source rate — the base64 icon is cached in `dialIconSig`, so each meter
     /// frame only ships tiny value/bar numbers. Keys ignore meters.
     private func ingestMeter(_ obj: [String: Any]) {
+        let now = Date().timeIntervalSinceReferenceDate
         for m in obj["mixes"] as? [[String: Any]] ?? [] {
             if let id = m["id"] as? String, let lvl = m["level"] as? Double {
-                levels[id] = smoothLevel(levels[id] ?? Self.meterFloorDB, Float(lvl))
+                let left = (m["levelLeft"] as? Double).map(Float.init)
+                let right = (m["levelRight"] as? Double).map(Float.init)
+                let stereo = smoothStereo(levels[id], mono: Float(lvl), left: left, right: right)
+                levels[id] = stereo
+                var window = peakWindows[id]
+                    ?? RollingPeakWindow(seconds: Self.peakWindowSeconds, floor: Self.meterFloorDB)
+                _ = window.append(left: stereo.left, right: stereo.right, at: now)
+                peakWindows[id] = window
             }
         }
         if let master = obj["master"] as? [String: Any], let lvl = master["level"] as? Double {
-            masterLevel = smoothLevel(masterLevel, Float(lvl))
+            let left = (master["levelLeft"] as? Double).map(Float.init)
+            let right = (master["levelRight"] as? Double).map(Float.init)
+            masterLevel = smoothStereo(masterLevel, mono: Float(lvl), left: left, right: right)
+            _ = masterPeakWindow.append(left: masterLevel.left, right: masterLevel.right, at: now)
         }
-        for (ctx, b) in contexts where b.kind.isDial || b.isEncoder { refresh(ctx) }
-        // Styled keys carry a live level too, but each refresh ships a full PNG —
-        // cap them to ~10fps.
-        let now = Date().timeIntervalSinceReferenceDate
-        if now - lastKeyMeter >= 0.1 {
-            lastKeyMeter = now
-            for (ctx, b) in contexts where (b.kind == .device || b.kind == .master) && !b.isEncoder {
-                refresh(ctx)
-            }
-        }
+        for (ctx, b) in contexts where b.kind.isDial || b.isEncoder { refresh(ctx, meterFrameAt: now) }
     }
 
-    /// Ballistics for the LCD level meter: eased attack on a rising level, slower
-    /// eased decay on the way down. Instant attack made the gbar twitch on every
-    /// transient and read as hectic; damping both directions (fast-ish up, slow
-    /// down) gives a calmer VU-style needle without lagging the program level.
+    /// Ballistics for the LCD level meter. The dial needle exposes latency more
+    /// than bars do, so keep attack fast and decay only moderately damped.
     private func smoothLevel(_ old: Float, _ new: Float) -> Float {
-        let coeff: Float = new >= old ? 0.55 : 0.25
+        let coeff: Float = new >= old ? 0.82 : 0.42
         return old + (new - old) * coeff
+    }
+
+    private func smoothStereo(_ old: StereoLevel?, mono: Float, left: Float?, right: Float?) -> StereoLevel {
+        let old = old ?? StereoLevel(mono: Self.meterFloorDB, left: Self.meterFloorDB, right: Self.meterFloorDB)
+        let l = left ?? mono
+        let r = right ?? mono
+        return StereoLevel(
+            mono: smoothLevel(old.mono, mono),
+            left: smoothLevel(old.left, l),
+            right: smoothLevel(old.right, r)
+        )
     }
 
     private func ingestState(_ obj: [String: Any]) {
@@ -435,7 +546,7 @@ final class ActionRouter {
         for (ctx, b) in contexts where (b.settings["mix"] as? String) == id { refresh(ctx) }
     }
 
-    private func refresh(_ ctx: String) {
+    private func refresh(_ ctx: String, meterFrameAt: TimeInterval? = nil) {
         guard let b = contexts[ctx] else { return }
         switch b.kind {
         case .device:
@@ -445,52 +556,89 @@ final class ActionRouter {
             // muted; label is user-chosen (none / name / custom / volume).
             let info = (b.settings["mix"] as? String).flatMap { mixes[$0] }
             if b.isEncoder {
-                let level = (b.settings["mix"] as? String).flatMap { levels[$0] } ?? Self.meterFloorDB
+                if shouldSkipDialFeedback(ctx: ctx, at: meterFrameAt) { return }
+                let mixID = b.settings["mix"] as? String
+                let level = mixID.flatMap { levels[$0] } ?? Self.silentStereo
+                let peak = mixID.flatMap { peakWindows[$0]?.peak }
+                let groupName = info?.name ?? ""
+                let accent = mixID.map(Self.accent(forID:)) ?? Self.accentPalette[0]
                 pushDialFeedback(ctx, b, glyph: deviceGlyph(info), name: info?.name ?? "",
-                                 pct: info?.pct ?? 0, muted: info?.muted ?? false, level: level)
+                                 pct: info?.pct ?? 0, muted: info?.muted ?? false, level: level,
+                                 peak: peak,
+                                 monogram: initials(groupName),
+                                 accent: accent, colorSig: colorSignature(forContext: ctx, accent: accent))
                 return
             }
             guard let info, let mixID = b.settings["mix"] as? String else {
-                elgato.setImage(nil, context: ctx); elgato.setTitle("", context: ctx); return
+                keyImageSig[ctx] = nil
+                elgato.setImage(nil, context: ctx); setTitleIfChanged("", context: ctx); return
             }
             if ((b.settings["mode"] as? String) ?? "mute") == "mute" {
                 elgato.setState(info.muted ? 1 : 0, context: ctx)
             }
-            let img = KeyStyleImage.render(
-                style: keyStyle(b), monogram: initials(info.name), accent: Self.accent(forID: mixID),
-                name: info.name, pct: info.pct, level: Self.levelFraction(levels[mixID] ?? Self.meterFloorDB),
-                muted: info.muted)
-            elgato.setImage(img, context: ctx)
-            elgato.setTitle("", context: ctx) // name/% are baked into the image
+            let accent = Self.accent(forID: mixID)
+            pushKeyImage(ctx, style: keyStyle(b), glyph: deviceGlyph(info),
+                         monogram: initials(info.name), accent: accent,
+                         colorSig: colorSignature(forContext: ctx, accent: accent),
+                         name: info.name, pct: info.pct,
+                         level: levels[mixID]?.mono ?? Self.meterFloorDB,
+                         muted: info.muted)
+            setTitleIfChanged("", context: ctx) // name/% are baked into the image
         case .master:
             // Same key/dial split as .device, but always the app's output-device
             // icon (no emoji) and no device picker.
             if b.isEncoder {
+                if shouldSkipDialFeedback(ctx: ctx, at: meterFrameAt) { return }
                 pushDialFeedback(ctx, b, glyph: .symbol(masterIcon), name: "Master",
-                                 pct: masterPct, muted: masterMuted, level: masterLevel)
+                                 pct: masterPct, muted: masterMuted, level: masterLevel,
+                                 peak: masterPeakWindow.peak,
+                                 monogram: "M", accent: Self.masterAccent,
+                                 colorSig: colorSignature(forContext: ctx, accent: Self.masterAccent))
                 return
             }
             if ((b.settings["mode"] as? String) ?? "mute") == "mute" {
                 elgato.setState(masterMuted ? 1 : 0, context: ctx)
             }
-            let img = KeyStyleImage.render(
-                style: keyStyle(b), monogram: "M", accent: Self.masterAccent,
-                name: "Master", pct: masterPct, level: Self.levelFraction(masterLevel), muted: masterMuted)
-            elgato.setImage(img, context: ctx)
-            elgato.setTitle("", context: ctx)
+            pushKeyImage(ctx, style: keyStyle(b), glyph: .symbol(masterIcon),
+                         monogram: "M", accent: Self.masterAccent,
+                         colorSig: colorSignature(forContext: ctx, accent: Self.masterAccent),
+                         name: "Master", pct: masterPct, level: masterLevel.mono,
+                         muted: masterMuted)
+            setTitleIfChanged("", context: ctx)
         case .deviceDial:
+            if shouldSkipDialFeedback(ctx: ctx, at: meterFrameAt) { return }
             let info = (b.settings["mix"] as? String).flatMap { mixes[$0] }
-            let level = (b.settings["mix"] as? String).flatMap { levels[$0] } ?? Self.meterFloorDB
+            let mixID = b.settings["mix"] as? String
+            let level = mixID.flatMap { levels[$0] } ?? Self.silentStereo
+            let peak = mixID.flatMap { peakWindows[$0]?.peak }
+            let groupName = info?.name ?? ""
+            let accent = mixID.map(Self.accent(forID:)) ?? Self.accentPalette[0]
             pushDialFeedback(ctx, b, glyph: deviceGlyph(info), name: info?.name ?? "",
-                             pct: info?.pct ?? 0, muted: info?.muted ?? false, level: level)
+                             pct: info?.pct ?? 0, muted: info?.muted ?? false, level: level,
+                             peak: peak,
+                             monogram: initials(groupName),
+                             accent: accent, colorSig: colorSignature(forContext: ctx, accent: accent))
         case .masterDial:
+            if shouldSkipDialFeedback(ctx: ctx, at: meterFrameAt) { return }
             pushDialFeedback(ctx, b, glyph: .symbol(masterIcon), name: "Master",
-                             pct: masterPct, muted: masterMuted, level: masterLevel)
+                             pct: masterPct, muted: masterMuted, level: masterLevel,
+                             peak: masterPeakWindow.peak,
+                             monogram: "M", accent: Self.masterAccent,
+                             colorSig: colorSignature(forContext: ctx, accent: Self.masterAccent))
         case .output:
             refreshOutput(ctx, b)
         case .unknown:
             break
         }
+    }
+
+    private func shouldSkipDialFeedback(ctx: String, at now: TimeInterval?) -> Bool {
+        guard let now else { return false }
+        if let last = lastDialFeedback[ctx], now - last < Self.dialFeedbackInterval {
+            return true
+        }
+        lastDialFeedback[ctx] = now
+        return false
     }
 
     /// Title = the user's emoji for the shown device (centered, no background), with
@@ -516,7 +664,13 @@ final class ActionRouter {
         let glyph: KeyImage.Glyph = shownUID.flatMap { emojis[$0] }.map { .emoji($0) }
             ?? .symbol(shown?.icon ?? Self.deviceFallbackSymbol)
         elgato.setImage(KeyImage.render(glyph, muted: false), context: ctx)
-        elgato.setTitle(showName ? name : "", context: ctx)
+        setTitleIfChanged(showName ? name : "", context: ctx)
+    }
+
+    private func setTitleIfChanged(_ title: String, context ctx: String) {
+        guard titleSig[ctx] != title else { return }
+        titleSig[ctx] = title
+        elgato.setTitle(title, context: ctx)
     }
 
     /// Device glyph for keys and dial LCDs: the user's emoji, or the speaker
@@ -532,28 +686,129 @@ final class ActionRouter {
         return chars.isEmpty ? "?" : String(chars).uppercased()
     }
 
-    /// Pushes one LCD frame. Every layout (band / slider / meter) carries the same
-    /// keys — title, value, slider, meter, icon — and renders whichever it defines,
-    /// so we always send the full set. The icon pixmap (device emoji / master icon,
-    /// red slash while muted) is base64 and costs ~5KB, so it's only re-sent when
-    /// its signature changes; numeric bars ship every frame.
+    private func pushKeyImage(_ ctx: String, style: KeyStyleImage.KeyStyle,
+                              glyph: KeyImage.Glyph, monogram: String, accent: NSColor,
+                              colorSig: String, name: String, pct: Int, level: Float, muted: Bool) {
+        let level = Self.levelFraction(level)
+        let levelStep = Self.keyLevelSignature(style: style, level: level, muted: muted)
+        let sig = [
+            styleSignature(style), glyphSignature(glyph), monogram, colorSig,
+            name, "\(pct)", "\(levelStep)", muted ? "m" : "u"
+        ].joined(separator: "|")
+        guard keyImageSig[ctx] != sig else { return }
+        keyImageSig[ctx] = sig
+        let img = KeyStyleImage.render(
+            style: style, glyph: glyph, monogram: monogram, accent: accent,
+            name: name, pct: pct, level: level, muted: muted)
+        elgato.setImage(img, context: ctx)
+    }
+
+    /// Pushes one LCD frame. All three encoder LCD styles use a full-canvas pixmap
+    /// so Stream Deck's native text/bar widgets cannot clip or reject the layout.
     private func pushDialFeedback(_ ctx: String, _ b: Binding, glyph: KeyImage.Glyph,
-                                  name: String, pct: Int, muted: Bool, level: Float) {
-        let meterVal = muted ? 0 : Self.levelPercent(level)
+                                  name: String, pct: Int, muted: Bool, level: StereoLevel,
+                                  peak: StereoPeak?,
+                                  monogram: String, accent: NSColor, colorSig: String) {
         var p: [String: Any] = [
             "title": name,
             "value": muted ? "MUTED" : "\(pct)%",
             "slider": pct,
-            "meter": meterVal,
+            "meter": muted ? 0 : Self.levelPercent(level.mono),
         ]
-        let sig = glyphSignature(glyph) + (muted ? "|m" : "")
-        if dialIconSig[ctx] != sig {
-            dialIconSig[ctx] = sig
-            let img = KeyImage.render(glyph, muted: muted, tint: true)
-            p["icon"] = img ?? ""        // LCD pixmap
-            elgato.setImage(img, context: ctx) // dial's canvas/preview square
+        let lcdStyle = dialStyle(b)
+        let styleKey = styleSignature(lcdStyle)
+        let iconSig = glyphSignature(glyph) + (muted ? "|m" : "")
+        var staticSig = ""
+        var meterSig = ""
+        var feedbackChanged = false
+        switch lcdStyle {
+        case .retro:
+            lcdMeterSig[ctx] = nil
+            staticSig = [
+                styleKey, name, monogram, "\(pct)", muted ? "m" : "u",
+                glyphSignature(glyph), colorSig
+            ].joined(separator: "|")
+            if lcdStaticSig[ctx] != staticSig {
+                lcdStaticSig[ctx] = staticSig
+                feedbackChanged = true
+                p["canvas"] = RetroMeterDrawing.renderRetroLCDStatic(
+                    name: name, glyph: glyph, monogram: monogram, accent: accent,
+                    pct: pct, muted: muted) ?? ""
+            }
+            let needleStep = RetroMeterDrawing.retroLCDLevelNeedleStep(
+                level: Self.levelFraction(level.mono), muted: muted)
+            let needleSig = "\(needleStep)|\(muted ? "m" : "u")"
+            if retroNeedleSig[ctx] != needleSig {
+                retroNeedleSig[ctx] = needleSig
+                meterSig = needleSig
+                feedbackChanged = true
+                p["levelNeedle"] = RetroMeterDrawing.renderRetroLCDLevelNeedleSVG(
+                    step: needleStep, muted: muted)
+            } else {
+                meterSig = needleSig
+            }
+        case .channel, .meter:
+            retroNeedleSig[ctx] = nil
+            p["levelNeedle"] = ["enabled": false]
+            staticSig = [
+                styleKey, name, monogram, "\(pct)", muted ? "m" : "u",
+                glyphSignature(glyph), colorSig
+            ].joined(separator: "|")
+            if lcdStaticSig[ctx] != staticSig {
+                lcdStaticSig[ctx] = staticSig
+                feedbackChanged = true
+                p["canvas"] = RetroMeterDrawing.renderLCDStatic(
+                    style: lcdStyle, name: name, glyph: glyph, monogram: monogram,
+                    accent: accent, pct: pct, muted: muted) ?? ""
+            }
+
+            let leftStep = RetroMeterDrawing.lcdLevelBarStep(
+                level: Self.levelFraction(level.left), muted: muted)
+            let rightStep = RetroMeterDrawing.lcdLevelBarStep(
+                level: Self.levelFraction(level.right), muted: muted)
+            let peakLeftStep = RetroMeterDrawing.lcdLevelBarStep(
+                level: Self.levelFraction(peak?.left ?? level.left), muted: muted)
+            let peakRightStep = RetroMeterDrawing.lcdLevelBarStep(
+                level: Self.levelFraction(peak?.right ?? level.right), muted: muted)
+            meterSig = "\(styleKey)|\(leftStep)|\(rightStep)|\(peakLeftStep)|\(peakRightStep)|\(muted ? "m" : "u")"
+            if lcdMeterSig[ctx] != meterSig {
+                lcdMeterSig[ctx] = meterSig
+                feedbackChanged = true
+                if lcdStyle == .channel {
+                    p["liveMeter"] = RetroMeterDrawing.renderLCDLevelBarSVG(
+                        width: 128, height: 17, step: max(leftStep, rightStep),
+                        peakStep: max(peakLeftStep, peakRightStep), muted: muted)
+                } else {
+                    p["leftMeter"] = RetroMeterDrawing.renderLCDLevelBarSVG(
+                        width: 113, height: 13, step: leftStep, peakStep: peakLeftStep, muted: muted)
+                    p["rightMeter"] = RetroMeterDrawing.renderLCDLevelBarSVG(
+                        width: 113, height: 13, step: rightStep, peakStep: peakRightStep, muted: muted)
+                }
+            }
         }
+        if dialIconSig[ctx] != iconSig {
+            dialIconSig[ctx] = iconSig
+            feedbackChanged = true
+            let img = KeyImage.render(glyph, muted: muted, tint: true)
+            elgato.setImage(img, context: ctx)
+            p["icon"] = img ?? ""
+        }
+        let feedbackSig = [
+            styleKey, name, muted ? "MUTED" : "\(pct)%",
+            "\(pct)", "\(Self.levelPercent(level.mono))",
+            staticSig, meterSig, iconSig
+        ].joined(separator: "|")
+        guard feedbackChanged || dialFeedbackSig[ctx] != feedbackSig else { return }
+        dialFeedbackSig[ctx] = feedbackSig
         elgato.setFeedback(p, context: ctx)
+    }
+
+    private func styleSignature(_ style: KeyStyleImage.KeyStyle) -> String {
+        switch style {
+        case .channel: return "c"
+        case .meter: return "m"
+        case .retro: return "r"
+        }
     }
 
     private func glyphSignature(_ glyph: KeyImage.Glyph) -> String {
@@ -561,5 +816,19 @@ final class ActionRouter {
         case .emoji(let s):  return "e:" + s
         case .symbol(let s): return "s:" + s
         }
+    }
+
+    private func colorSignature(_ color: NSColor) -> String {
+        let c = color.usingColorSpace(.deviceRGB) ?? color
+        return String(format: "%.3f,%.3f,%.3f,%.3f",
+                      Double(c.redComponent), Double(c.greenComponent),
+                      Double(c.blueComponent), Double(c.alphaComponent))
+    }
+
+    private func colorSignature(forContext ctx: String, accent: NSColor) -> String {
+        if let cached = colorSigCache[ctx] { return cached }
+        let sig = colorSignature(accent)
+        colorSigCache[ctx] = sig
+        return sig
     }
 }

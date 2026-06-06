@@ -38,17 +38,17 @@
   <div class="row" id="styleRow">
     <label>Dial LCD</label>
     <select id="style">
-      <option value="combined">Combined</option>
-      <option value="slider">Volume Slider</option>
-      <option value="meter">Level Meter</option>
+      <option value="channel">Channel Strip</option>
+      <option value="meter">Stereo Monitor</option>
+      <option value="retro">Retro VU</option>
     </select>
   </div>
   <div class="row" id="keyStyleRow">
     <label>Key style</label>
     <select id="keyStyle">
-      <option value="meter">Level Meter</option>
-      <option value="bars">Level Bars</option>
-      <option value="radial">Radial Gauge</option>
+      <option value="channel">Channel Strip</option>
+      <option value="meter">Stereo Monitor</option>
+      <option value="retro">Retro VU</option>
     </select>
   </div>
 
@@ -94,9 +94,16 @@
       stepEl.value = Math.round((s.step ?? 0.05) * 100);
       stepVal.textContent = fmtStep(+stepEl.value);
       posEl.value = Math.round((s.pos ?? 0.5) * 100);
-      styleEl.value = s.style || "combined";
-      keyStyleEl.value = s.keyStyle || "meter";
+      styleEl.value = normalizeStyle(s.style || "channel");
+      keyStyleEl.value = normalizeStyle(s.keyStyle || "channel");
       applyMode();
+    }
+
+    function normalizeStyle(value) {
+      if (value === "combined" || value === "slider") return "channel";
+      if (value === "bars") return "meter";
+      if (value === "radial") return "retro";
+      return value;
     }
 
     mixEl.onchange = () => setSetting("mix", mixEl.value);

@@ -1,11 +1,23 @@
 import Foundation
 
+@MainActor
+protocol ElgatoCommandSink: AnyObject {
+    func setTitle(_ title: String, context: String)
+    func setState(_ state: Int, context: String)
+    func showAlert(context: String)
+    func setImage(_ image: String?, context: String)
+    func setGlobalSettings(_ payload: [String: Any])
+    func sendToPropertyInspector(action: String, context: String, payload: [String: Any])
+    func setFeedback(_ payload: [String: Any], context: String)
+    func setFeedbackLayout(_ layout: String, context: String)
+}
+
 /// Speaks the Elgato Stream Deck WebSocket protocol: connects to the local
 /// `ws://127.0.0.1:<port>`, registers the plugin, and forwards inbound events
 /// (`willAppear`, `keyDown`, …) to `onEvent`. Hand-rolled over
 /// `URLSessionWebSocketTask` — there is no official Swift SDK.
 @MainActor
-final class ElgatoConnection {
+final class ElgatoConnection: ElgatoCommandSink {
     private let registration: ElgatoRegistration
     private let session = URLSession(configuration: .default)
     private var task: URLSessionWebSocketTask?

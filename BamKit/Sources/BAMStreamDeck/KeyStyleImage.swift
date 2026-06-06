@@ -1,9 +1,9 @@
 import AppKit
 import Foundation
 
-/// Renders a rich Stream Deck *keypad* key for a device/master volume control: a dark
-/// rounded card with a colored monogram chip, the source name, the volume %, and a live
-/// level visualization. Three styles select the visualization (see `KeyStyle`).
+/// Renders a rich Stream Deck *keypad* key for a device/master volume control.
+/// Each style keeps the group identity prominent and treats the live meter as part
+/// of the control language instead of secondary decoration.
 ///
 /// Output is a `data:image/png;base64,…` URI ready for `setImage`. Like `KeyImage`, it
 /// draws into an `NSBitmapImageRep`-backed context (not `NSImage.lockFocus`) so it works
@@ -12,14 +12,14 @@ import Foundation
 enum KeyStyleImage {
 
     enum KeyStyle: String {
-        case meter   // vertical LED peak meter + horizontal volume bar
-        case bars    // horizontal segmented LVL bar + VOL capsule with knob
-        case radial  // 270° volume arc around a centered monogram
+        case channel // compact channel strip: group identity + live meter + volume rail
+        case meter   // meter-focused tile: larger live signal display + volume marker
+        case retro   // VU-style gauge with live needle + red volume needle
     }
 
     private static let side: CGFloat = 144
 
-    static func render(style: KeyStyle, monogram: String, accent: NSColor,
+    static func render(style: KeyStyle, glyph: KeyImage.Glyph? = nil, monogram: String, accent: NSColor,
                        name: String, pct: Int, level: Float, muted: Bool) -> String? {
         let px = Int(side)
         guard let rep = NSBitmapImageRep(
@@ -34,9 +34,9 @@ enum KeyStyleImage {
 
         drawBackground()
         switch style {
-        case .meter:  drawMeter(monogram: monogram, accent: accent, name: name, pct: pct, level: level, muted: muted)
-        case .bars:   drawBars(monogram: monogram, accent: accent, name: name, pct: pct, level: level, muted: muted)
-        case .radial: drawRadial(monogram: monogram, accent: accent, name: name, pct: pct, level: level, muted: muted)
+        case .channel: drawChannel(glyph: glyph, monogram: monogram, accent: accent, name: name, pct: pct, level: level, muted: muted)
+        case .meter:   drawMeterFocus(glyph: glyph, monogram: monogram, accent: accent, name: name, pct: pct, level: level, muted: muted)
+        case .retro:   drawRetro(glyph: glyph, monogram: monogram, accent: accent, name: name, pct: pct, level: level, muted: muted)
         }
 
         ctx.flushGraphics()
@@ -60,15 +60,51 @@ enum KeyStyleImage {
         NSBezierPath(roundedRect: r, xRadius: 20, yRadius: 20).fill()
     }
 
-    /// Colored rounded chip with centered white initials.
-    private static func drawChip(rect: NSRect, accent: NSColor, text: String, fontSize: CGFloat) {
+    /// Colored rounded chip with the BAM icon/emoji, falling back to initials.
+    private static func drawChip(rect: NSRect, accent: NSColor, glyph: KeyImage.Glyph?,
+                                 text: String, fontSize: CGFloat) {
         accent.setFill()
         NSBezierPath(roundedRect: rect, xRadius: rect.width * 0.28, yRadius: rect.width * 0.28).fill()
+        if let glyph, drawGlyph(glyph, in: rect.insetBy(dx: 7, dy: 7), tintSymbols: true) {
+            return
+        }
         let f = NSFont.systemFont(ofSize: fontSize, weight: .bold)
         let attrs: [NSAttributedString.Key: Any] = [.font: f, .foregroundColor: NSColor.white]
         let s = NSAttributedString(string: text, attributes: attrs)
         let sz = s.size()
         s.draw(at: NSPoint(x: rect.midX - sz.width / 2, y: rect.midY - sz.height / 2))
+    }
+
+    @discardableResult
+    private static func drawGlyph(_ glyph: KeyImage.Glyph, in rect: NSRect, tintSymbols: Bool) -> Bool {
+        switch glyph {
+        case .emoji(let value):
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return false }
+            let font = NSFont.systemFont(ofSize: rect.height * 0.82)
+            let str = NSAttributedString(string: trimmed, attributes: [.font: font])
+            let size = str.size()
+            let point = NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2)
+            str.draw(at: point)
+            return true
+        case .symbol(let name):
+            guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: nil) else {
+                return false
+            }
+            let config = NSImage.SymbolConfiguration(pointSize: rect.height * 0.82, weight: .regular)
+            let image = symbol.withSymbolConfiguration(config) ?? symbol
+            let size = image.size
+            let scale = min(rect.width / max(size.width, 1), rect.height / max(size.height, 1))
+            let dest = NSRect(x: rect.midX - size.width * scale / 2,
+                              y: rect.midY - size.height * scale / 2,
+                              width: size.width * scale, height: size.height * scale)
+            image.draw(in: dest, from: .zero, operation: .sourceOver, fraction: 1)
+            if tintSymbols {
+                NSColor.white.set()
+                dest.fill(using: .sourceAtop)
+            }
+            return true
+        }
     }
 
     /// Draw text whose top-left sits at (`x`, top offset `topY`), clipped to `maxWidth`.
@@ -98,25 +134,23 @@ enum KeyStyleImage {
         return NSColor(calibratedRed: 0.22, green: 0.83, blue: 0.33, alpha: 1)
     }
 
-    // MARK: - Style: meter
+    // MARK: - Style: channel
 
-    private static func drawMeter(monogram: String, accent: NSColor, name: String,
-                                  pct: Int, level: Float, muted: Bool) {
-        let chip = NSRect(x: 14, y: top(50), width: 36, height: 36)
-        drawChip(rect: chip, accent: initialsColor(muted, accent), text: monogram, fontSize: 16)
-        drawText(name, x: 58, topY: 16, size: 13, weight: .semibold, color: .white, maxWidth: 74)
+    private static func drawChannel(glyph: KeyImage.Glyph?, monogram: String, accent: NSColor, name: String,
+                                    pct: Int, level: Float, muted: Bool) {
+        let chip = NSRect(x: 12, y: top(52), width: 40, height: 40)
+        drawChip(rect: chip, accent: initialsColor(muted, accent), glyph: glyph, text: monogram, fontSize: 17)
+        drawText(name, x: 60, topY: 14, size: 13, weight: .semibold, color: .white, maxWidth: 72)
 
-        // Big volume % (or MUTE).
         if muted {
-            drawText("MUTE", x: 58, topY: 40, size: 22, weight: .heavy, color: mutedRed, maxWidth: 74)
+            drawText("MUTED", x: 60, topY: 37, size: 18, weight: .heavy, color: mutedRed, maxWidth: 72)
         } else {
-            drawText("\(pct)%", x: 58, topY: 38, size: 26, weight: .heavy, color: .white, maxWidth: 74)
+            drawText("\(pct)%", x: 60, topY: 34, size: 27, weight: .heavy, color: .white, maxWidth: 72)
         }
 
-        // Vertical LED peak meter on the right edge.
         let segs = 12
-        let mx = side - 26.0, mw = 14.0
-        let myTop = top(18.0), myBot = 30.0
+        let mx = side - 24.0, mw = 12.0
+        let myTop = top(18.0), myBot = 34.0
         let gap = 3.0
         let segH = (myTop - myBot - gap * CGFloat(segs - 1)) / CGFloat(segs)
         let lit = muted ? 0 : Int((CGFloat(max(0, min(1, level))) * CGFloat(segs)).rounded())
@@ -129,35 +163,33 @@ enum KeyStyleImage {
             NSBezierPath(roundedRect: r, xRadius: 2, yRadius: 2).fill()
         }
 
-        // Slim horizontal volume bar along the bottom.
-        let track = NSRect(x: 14, y: 16, width: side - 56, height: 7)
+        let track = NSRect(x: 12, y: 16, width: side - 48, height: 8)
         NSColor(calibratedWhite: 0.22, alpha: 1).setFill()
-        NSBezierPath(roundedRect: track, xRadius: 3.5, yRadius: 3.5).fill()
+        NSBezierPath(roundedRect: track, xRadius: 4, yRadius: 4).fill()
         let fillW = track.width * CGFloat(max(0, min(100, pct))) / 100
         if fillW > 1 {
             (muted ? mutedRed : accent).setFill()
             NSBezierPath(roundedRect: NSRect(x: track.minX, y: track.minY, width: fillW, height: track.height),
-                         xRadius: 3.5, yRadius: 3.5).fill()
+                         xRadius: 4, yRadius: 4).fill()
         }
     }
 
-    // MARK: - Style: bars
+    // MARK: - Style: meter
 
-    private static func drawBars(monogram: String, accent: NSColor, name: String,
-                                 pct: Int, level: Float, muted: Bool) {
-        let chip = NSRect(x: 14, y: top(48), width: 34, height: 34)
-        drawChip(rect: chip, accent: initialsColor(muted, accent), text: monogram, fontSize: 15)
-        drawText(name, x: 56, topY: 14, size: 13, weight: .semibold, color: .white, maxWidth: 76)
+    private static func drawMeterFocus(glyph: KeyImage.Glyph?, monogram: String, accent: NSColor, name: String,
+                                       pct: Int, level: Float, muted: Bool) {
+        drawText(name, x: 12, topY: 12, size: 13, weight: .semibold, color: .white, maxWidth: side - 24)
+
+        let chip = NSRect(x: 12, y: top(56), width: 36, height: 36)
+        drawChip(rect: chip, accent: initialsColor(muted, accent), glyph: glyph, text: monogram, fontSize: 16)
         if muted {
-            drawText("MUTE", x: 56, topY: 34, size: 16, weight: .heavy, color: mutedRed, maxWidth: 76)
+            drawText("MUTED", x: 56, topY: 36, size: 20, weight: .heavy, color: mutedRed, maxWidth: 76)
         } else {
-            drawText("\(pct)%", x: 56, topY: 32, size: 18, weight: .heavy, color: .white, maxWidth: 76)
+            drawText("\(pct)%", x: 58, topY: 33, size: 24, weight: .heavy, color: .white, maxWidth: 74)
         }
 
-        // LVL: horizontal segmented level bar.
-        drawText("LVL", x: 14, topY: 76, size: 9, weight: .bold, color: NSColor(calibratedWhite: 0.55, alpha: 1), maxWidth: 30)
-        let segs = 14
-        let bx = 14.0, bw = side - 28.0, by = top(98.0), bh = 12.0
+        let segs = 18
+        let bx = 12.0, bw = side - 24.0, by = top(92.0), bh = 16.0
         let gap = 2.0
         let segW = (bw - gap * CGFloat(segs - 1)) / CGFloat(segs)
         let lit = muted ? 0 : Int((CGFloat(max(0, min(1, level))) * CGFloat(segs)).rounded())
@@ -169,9 +201,7 @@ enum KeyStyleImage {
             NSBezierPath(roundedRect: r, xRadius: 2, yRadius: 2).fill()
         }
 
-        // VOL: capsule track with a knob at the volume position.
-        drawText("VOL", x: 14, topY: 110, size: 9, weight: .bold, color: NSColor(calibratedWhite: 0.55, alpha: 1), maxWidth: 30)
-        let tx = 14.0, tw = side - 28.0, ty = top(130.0), th = 8.0
+        let tx = 12.0, tw = side - 24.0, ty = top(126.0), th = 8.0
         NSColor(calibratedWhite: 0.22, alpha: 1).setFill()
         NSBezierPath(roundedRect: NSRect(x: tx, y: ty, width: tw, height: th), xRadius: 4, yRadius: 4).fill()
         let frac = CGFloat(max(0, min(100, pct))) / 100
@@ -183,48 +213,12 @@ enum KeyStyleImage {
         NSBezierPath(ovalIn: NSRect(x: knobX - kr, y: ty + th / 2 - kr, width: kr * 2, height: kr * 2)).fill()
     }
 
-    // MARK: - Style: radial
+    // MARK: - Style: retro
 
-    private static func drawRadial(monogram: String, accent: NSColor, name: String,
-                                   pct: Int, level: Float, muted: Bool) {
-        drawText(name, x: 12, topY: 12, size: 13, weight: .semibold, color: .white, maxWidth: side - 24)
-
-        let cx = side / 2, cy = top(82.0)
-        let radius = 42.0
-        let lw = 9.0
-        // Gauge sweeps 270°: from 225° clockwise down to -45° (i.e. 225 → -45).
-        let startA = 225.0, endA = -45.0
-        let trackPath = NSBezierPath()
-        trackPath.appendArc(withCenter: NSPoint(x: cx, y: cy), radius: radius,
-                            startAngle: startA, endAngle: endA, clockwise: true)
-        trackPath.lineWidth = lw
-        trackPath.lineCapStyle = .round
-        NSColor(calibratedWhite: 0.20, alpha: 1).setStroke()
-        trackPath.stroke()
-
-        let frac = CGFloat(max(0, min(100, pct))) / 100
-        let sweepEnd = startA - 270.0 * frac
-        if frac > 0.001 {
-            let fillPath = NSBezierPath()
-            fillPath.appendArc(withCenter: NSPoint(x: cx, y: cy), radius: radius,
-                               startAngle: startA, endAngle: sweepEnd, clockwise: true)
-            fillPath.lineWidth = lw
-            fillPath.lineCapStyle = .round
-            (muted ? mutedRed : accent).setStroke()
-            fillPath.stroke()
-        }
-
-        // Centered monogram chip.
-        let chipSide = 40.0
-        let chip = NSRect(x: cx - chipSide / 2, y: cy - chipSide / 2, width: chipSide, height: chipSide)
-        drawChip(rect: chip, accent: initialsColor(muted, accent), text: monogram, fontSize: 17)
-
-        // % or MUTE below the gauge.
-        let label = muted ? "MUTE" : "\(pct)%"
-        let f = NSFont.systemFont(ofSize: muted ? 18 : 22, weight: .heavy)
-        let attrs: [NSAttributedString.Key: Any] = [.font: f, .foregroundColor: muted ? mutedRed : NSColor.white]
-        let s = NSAttributedString(string: label, attributes: attrs)
-        let sz = s.size()
-        s.draw(at: NSPoint(x: cx - sz.width / 2, y: 14))
+    private static func drawRetro(glyph: KeyImage.Glyph?, monogram: String, accent: NSColor, name: String,
+                                  pct: Int, level: Float, muted: Bool) {
+        RetroMeterDrawing.drawKeyFrame(side: side, name: name, glyph: glyph, monogram: monogram,
+                                       accent: accent, pct: pct, level: level,
+                                       muted: muted)
     }
 }
