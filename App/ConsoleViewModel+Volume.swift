@@ -79,7 +79,7 @@ extension ConsoleViewModel {
         outputDevices.filter(Self.isSelectableHardwareOutput)
     }
 
-    static func isSelectableHardwareOutput(_ device: AudioDevice) -> Bool {
+    nonisolated static func isSelectableHardwareOutput(_ device: AudioDevice) -> Bool {
         if device.uid.hasPrefix("BAM_UID_") { return false }
         if device.uid.hasPrefix("bam-router") { return false }
         if device.name.caseInsensitiveCompare("bam-router") == .orderedSame { return false }
