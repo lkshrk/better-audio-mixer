@@ -6,7 +6,7 @@ import os
 
 private let kProtocolVersion = 1
 private let kAppName = "BAM"
-private let kBuildVersion = "1.0.0"
+private let kBuildVersion = "1.0.1"
 
 private enum ControlLog {
     static let logger = Logger(subsystem: "me.harke.bam", category: "control")

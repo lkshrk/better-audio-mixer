@@ -99,7 +99,7 @@ private func readFrameOfType(_ fd: Int32, buf: RecvBuf, type: String,
 
 final class FrameEncodingTests: XCTestCase {
     func testEncodeRoundTrip() throws {
-        let obj: [String: Any] = ["t": "hello-ack", "v": 1, "app": "BAM", "build": "1.0.0"]
+        let obj: [String: Any] = ["t": "hello-ack", "v": 1, "app": "BAM", "build": "1.0.1"]
         let data = try encodeFrame(obj)
         let back = try decodeFrame(data)
         XCTAssertEqual(back["t"] as? String, "hello-ack")
