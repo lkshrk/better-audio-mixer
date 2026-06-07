@@ -5,9 +5,13 @@ import Foundation
 extension ConsoleViewModel {
     // MARK: system output (the hardware the Default device feeds)
 
-    var systemOutputUID: String? {
+    static func hardwareOutputUID(in config: BamConfig) -> String? {
         if case .hardware(let uid) = config.mixes.first(where: { $0.id == Self.defaultMixID })?.dest { return uid }
         return nil
+    }
+
+    var systemOutputUID: String? {
+        Self.hardwareOutputUID(in: config)
     }
 
     var systemOutputName: String {
@@ -37,6 +41,7 @@ extension ConsoleViewModel {
         do { try draft.validate() } catch {
             self.error = String(describing: error)
             AppLog.config.error("system output draft invalid: \(String(describing: error), privacy: .public)")
+            if let previous, previous != uid { CoreAudioEngine.setDeviceMuted(uid: previous, false) }
             CoreAudioEngine.setDeviceMuted(uid: uid, false)
             return
         }
@@ -44,33 +49,56 @@ extension ConsoleViewModel {
         config = draft
         persist(draft)
         guard driverEnabled else {
+            if let previous, previous != uid { CoreAudioEngine.setDeviceMuted(uid: previous, false) }
             CoreAudioEngine.setDeviceMuted(uid: uid, false)
             return
         }
 
         let muted = draft.masterMuted
-        restoringVolume = true
-        Task {
-            defer { restoringVolume = false }
-            applyRouterStatus(await engine.startRouter(config: draft))
+        enqueueRouterWork { model in
+            model.restoringVolume = true
+            defer { model.restoringVolume = false }
+            model.applyRouterStatus(await model.engine.startRouter(config: draft))
+            guard !Task.isCancelled else { return }
 
             // Re-assert silence after the aggregate rebuild, then restore/fade.
             CoreAudioEngine.setDeviceMuted(uid: uid, true)
-            await engine.setOutputVolume(uid: uid, 0)
-            outputVolume = 0
+            await model.engine.setOutputVolume(uid: uid, 0)
+            model.outputVolume = 0
             if let previous, previous != uid {
-                await engine.setOutputVolume(uid: previous, Float(target))
-                await engine.setOutputMuted(uid: previous, false)
+                await model.engine.setOutputVolume(uid: previous, Float(target))
+                await model.engine.setOutputMuted(uid: previous, false)
             }
 
             if muted {
-                await engine.setOutputVolume(uid: uid, Float(target))
-                outputVolume = target
+                await model.engine.setOutputVolume(uid: uid, Float(target))
+                model.outputVolume = target
             } else {
                 CoreAudioEngine.setDeviceMuted(uid: uid, false)
-                await rampOutputVolume(uid: uid, from: 0, to: target)
+                await model.rampOutputVolume(uid: uid, from: 0, to: target)
             }
         }
+    }
+
+    func startRouterGuarded(config draft: BamConfig) async -> RouterStatus {
+        guard driverEnabled, let uid = Self.hardwareOutputUID(in: draft) else {
+            return await engine.startRouter(config: draft)
+        }
+        let target = await engine.outputVolume(uid: uid).map(Double.init) ?? outputVolume
+        let muted = draft.masterMuted
+
+        restoringVolume = true
+        await engine.setOutputMuted(uid: uid, true)
+        defer { restoringVolume = false }
+
+        let status = await engine.startRouter(config: draft)
+
+        await engine.setOutputMuted(uid: uid, true)
+        await engine.setOutputVolume(uid: uid, Float(target))
+        if !muted {
+            await engine.setOutputMuted(uid: uid, false)
+        }
+        return status
     }
 
     /// User-selectable hardware outputs only - hides BAM's virtual devices and

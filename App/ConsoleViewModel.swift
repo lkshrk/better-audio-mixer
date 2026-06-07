@@ -244,7 +244,7 @@ final class ConsoleViewModel {
     /// engine resolves it against the live list, and we write the resolved UID back
     /// so the Default mix points at the right device across restarts.
     private func startRouterReconciling() async {
-        let status = await engine.startRouter(config: config)
+        let status = await startRouterGuarded(config: config)
         applyRouterStatus(status)
         guard let bound = await engine.boundOutputUID(),
               let i = config.mixes.firstIndex(where: { $0.id == Self.defaultMixID })
@@ -286,23 +286,24 @@ final class ConsoleViewModel {
     /// Recovery is cause-aware. The event subscription (`subscribeRouterEvents`)
     /// already retries the instant an app starts or a device appears, which heals
     /// `noOutput` and `noSourcesRunning` with no polling. The only cause an event
-    /// can't catch is `permissionPending`: granting TCC fires no CoreAudio change,
-    /// so for that we run a bounded backoff heartbeat (2→4→8→16→30s, capped) that
+    /// can't catch is `permissionPending`: granting TCC fires no CoreAudio change.
+    /// `buildFailed` can also be a transient HAL/aggregate failure with no later
+    /// event. Both use a bounded backoff heartbeat (2→4→8→16→30s, capped) that
     /// stops as soon as the router comes online or the driver is turned off.
-    /// Non-permission causes don't poll at all — they wait for their event.
     private func scheduleRouterRecovery(for status: RouterStatus) {
         recoveryTask?.cancel(); recoveryTask = nil
-        guard driverEnabled, status.cause == .permissionPending else { return }
-        AppLog.router.debug("permission recovery heartbeat scheduled")
+        guard driverEnabled, status.cause == .permissionPending || status.cause == .buildFailed else { return }
+        let cause = status.cause
+        AppLog.router.debug("router recovery heartbeat scheduled cause=\(cause.rawValue, privacy: .public)")
         recoveryTask = Task { [weak self] in
             var delay: UInt64 = 2
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(Double(delay)))
                 guard let self, self.driverEnabled, !Task.isCancelled else { return }
-                AppLog.router.debug("permission recovery heartbeat delay=\(delay, privacy: .public)s")
-                let next = await self.engine.startRouter(config: self.config)
+                AppLog.router.debug("router recovery heartbeat cause=\(cause.rawValue, privacy: .public) delay=\(delay, privacy: .public)s")
+                let next = await self.startRouterGuarded(config: self.config)
                 self.applyRouterStatus(next)
-                if next.cause != .permissionPending { return }   // online or moved to a cause the events own
+                if next.cause != cause { return }   // online or moved to another cause that schedules its own path
                 delay = min(delay * 2, 30)
             }
         }
@@ -451,17 +452,23 @@ final class ConsoleViewModel {
     }
 
     private func enqueueRouterMutation(topology: Bool, draft: BamConfig) {
+        enqueueRouterWork { model in
+            if topology {
+                let status = await model.startRouterGuarded(config: draft)
+                guard !Task.isCancelled else { return }
+                model.applyRouterStatus(status)
+            } else {
+                await model.engine.updateRouterGains(config: draft)
+            }
+        }
+    }
+
+    func enqueueRouterWork(_ work: @escaping @MainActor (ConsoleViewModel) async -> Void) {
         let previous = routerMutationTask
         routerMutationTask = Task { [weak self] in
             await previous?.value
             guard let self, self.driverEnabled, !Task.isCancelled else { return }
-            if topology {
-                let status = await self.engine.startRouter(config: draft)
-                guard !Task.isCancelled else { return }
-                self.applyRouterStatus(status)
-            } else {
-                await self.engine.updateRouterGains(config: draft)
-            }
+            await work(self)
         }
     }
 

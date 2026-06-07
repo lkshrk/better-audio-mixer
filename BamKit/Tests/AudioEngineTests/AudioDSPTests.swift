@@ -1,5 +1,6 @@
 import XCTest
 @testable import AudioEngine
+import BamCore
 
 final class AudioDSPTests: XCTestCase {
     private func rms(_ samples: [Float]) -> Float {
@@ -58,6 +59,25 @@ final class AudioDSPTests: XCTestCase {
         XCTAssertEqual(
             CoreAudioEngine.tapCaptureOutputUID(targetOutputUID: "Speakers", defaultOutputUID: nil),
             "Speakers"
+        )
+    }
+
+    func testMixIDsReferencingFailedTapSourcesOnlyMarksAffectedMixes() {
+        let config = BamConfig(
+            sources: [
+                Source(id: "browser", name: "Browser", kind: .app, bundleIDs: ["com.browser"]),
+                Source(id: "music", name: "Music", kind: .app, bundleIDs: ["com.music"]),
+            ],
+            mixes: [
+                Mix(id: "chat", name: "Chat", dest: .virtualSlot(0), sends: [Send(source: "browser")]),
+                Mix(id: "stream", name: "Stream", dest: .virtualSlot(1), sends: [Send(source: "browser"), Send(source: "music")]),
+                Mix(id: "music-only", name: "Music", dest: .virtualSlot(2), sends: [Send(source: "music")]),
+            ]
+        )
+
+        XCTAssertEqual(
+            CoreAudioEngine.mixIDs(referencing: ["browser"], in: config),
+            ["chat", "stream"]
         )
     }
 }

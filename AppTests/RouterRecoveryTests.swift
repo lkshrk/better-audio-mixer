@@ -28,6 +28,15 @@ final class RouterRecoveryTests: XCTestCase {
         return cond()
     }
 
+    private func eventuallyAsync(_ timeout: TimeInterval = 1.0, _ cond: () async -> Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if await cond() { return true }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        return await cond()
+    }
+
     private func config(mix: String = "m0") -> BamConfig {
         BamConfig(
             sources: [Source(id: "s0", name: "App", kind: .app, bundleIDs: ["com.x"])],
@@ -147,6 +156,25 @@ final class RouterRecoveryTests: XCTestCase {
         await model.stop()
     }
 
+    func testBuildFailedRecoversViaHeartbeat() async {
+        let mock = MockAudioEngine()
+        await mock.scriptRouterStatuses([
+            RouterStatus(failedMixIDs: ["m0"], cause: .buildFailed),
+            .ok,
+        ])
+        let model = ConsoleViewModel(engine: mock, defaults: defaults)
+        await model.startMock(config: config())
+
+        XCTAssertEqual(model.failedMixIDs, ["m0"])
+        XCTAssertEqual(model.routerStatus.cause, .buildFailed)
+        XCTAssertEqual(model.routerStatusMessage, "Audio engine couldn't start — retrying automatically.")
+
+        let healed = await eventually(4.0) { model.failedMixIDs.isEmpty }
+        XCTAssertTrue(healed, "buildFailed heartbeat should retry and recover")
+        XCTAssertEqual(model.routerStatus.cause, .ok)
+        await model.stop()
+    }
+
     func testPermissionHeartbeatUsesCentralStatusFoldWhenRecovered() async {
         let mock = MockAudioEngine()
         await mock.scriptRouterStatuses([
@@ -157,7 +185,7 @@ final class RouterRecoveryTests: XCTestCase {
         await model.startMock(config: config())
 
         await mock.emitRouterRecoveryEvent(.paused(
-            reason: "silent render",
+            reason: "source tap stalled",
             attempts: 3,
             window: 120,
             cooldown: 300
@@ -201,10 +229,10 @@ final class RouterRecoveryTests: XCTestCase {
         let model = ConsoleViewModel(engine: mock, defaults: defaults)
         await model.startMock(config: config())
 
-        await mock.emitRouterRecoveryEvent(.attempting(reason: "silent render", attempt: 2))
+        await mock.emitRouterRecoveryEvent(.attempting(reason: "source tap stalled", attempt: 2))
 
         let shown = await eventually {
-            model.audioRecoveryDisplayState == .recovering(reason: "silent render", attempt: 2)
+            model.audioRecoveryDisplayState == .recovering(reason: "source tap stalled", attempt: 2)
         }
         XCTAssertTrue(shown)
         XCTAssertFalse(model.audioRecoveryDisplayState.isActionable)
@@ -233,6 +261,59 @@ final class RouterRecoveryTests: XCTestCase {
         let callsAfterRestart = await mock.startRouterCalls
         XCTAssertEqual(resetCalls, 1)
         XCTAssertEqual(callsAfterRestart, callsBeforeRestart + 1)
+        await model.stop()
+    }
+
+    func testRestartAudioGuardsHardwareVolumeDuringRebuild() async {
+        let mock = MockAudioEngine()
+        let model = ConsoleViewModel(engine: mock, defaults: defaults)
+        await model.startMock(config: config())
+        await mock.setOutputVolume(uid: "MockOutput", 0.42)
+        model.outputVolume = 0.42
+        await mock.resetCalls()
+
+        await model.restartAudio()
+
+        let calls = await mock.calls
+        XCTAssertEqual(calls, [
+            .setOutputMuted(uid: "MockOutput", muted: true),
+            .startRouter,
+            .setOutputMuted(uid: "MockOutput", muted: true),
+            .setOutputVolume(uid: "MockOutput", volume: 0.42),
+            .setOutputMuted(uid: "MockOutput", muted: false),
+        ])
+        await model.stop()
+    }
+
+    func testOutputSwitchSerializesWithTopologyRebuilds() async {
+        let mock = MockAudioEngine()
+        await mock.setStartRouterDelay(.milliseconds(120))
+        let model = ConsoleViewModel(engine: mock, defaults: defaults)
+        await model.startMock(config: config())
+        model.config.masterMuted = true
+        model.outputVolume = 0.42
+        await mock.resetCalls()
+
+        model.setSystemOutput("OtherOutput")
+        model.applyTopology { $0.master = 0.9 }
+
+        let transitionComplete = await eventuallyAsync(1.0) {
+            await mock.calls.count >= 9
+        }
+        XCTAssertTrue(transitionComplete)
+
+        let calls = await mock.calls
+        XCTAssertEqual(calls, [
+            .startRouter,
+            .setOutputVolume(uid: "OtherOutput", volume: 0),
+            .setOutputVolume(uid: "MockOutput", volume: 0.42),
+            .setOutputMuted(uid: "MockOutput", muted: false),
+            .setOutputVolume(uid: "OtherOutput", volume: 0.42),
+            .setOutputMuted(uid: "OtherOutput", muted: true),
+            .startRouter,
+            .setOutputMuted(uid: "OtherOutput", muted: true),
+            .setOutputVolume(uid: "OtherOutput", volume: 0.42),
+        ])
         await model.stop()
     }
 }

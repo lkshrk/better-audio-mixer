@@ -79,15 +79,12 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         var lastFires = -1
         var staleSamples = 0
         var noInputSamples = 0
-        var renderSilentSamples = 0
         var outputFormatDriftSamples = 0
         var sourceFormatDriftSamples: [String: Int] = [:]
         var lastSourceFrames: [String: Int] = [:]
         var sourceStaleSamples: [String: Int] = [:]
     }
 
-    private static let healthSilenceDB: Float = -72
-    private static let healthOutputSilencePeak: Float = 0.00025
     private static let healthGainFloor: Double = 0.0001
 
     public init() {}
@@ -330,6 +327,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         // gain tweaks) create nothing — no permission prompt, no unmute window.
         var newLive: [String: (sig: String, tap: RouterAggregate.Tap)] = [:]
         var orderedTaps: [RouterAggregate.Tap] = []
+        var failedTapSourceIDs = Set<String>()
         for d in desired {
             if let cached = liveTaps[d.sourceID], cached.sig == d.sig {
                 newLive[d.sourceID] = cached
@@ -338,7 +336,14 @@ public actor CoreAudioEngine: AudioEngineProtocol {
                 let tap = RouterAggregate.Tap(sourceID: d.sourceID, proc: proc)
                 newLive[d.sourceID] = (d.sig, tap)
                 orderedTaps.append(tap)
+            } else {
+                failedTapSourceIDs.insert(d.sourceID)
             }
+        }
+        if !failedTapSourceIDs.isEmpty {
+            let failedMixIDs = Self.mixIDs(referencing: failedTapSourceIDs, in: config)
+            bamLog("startRouter: process tap creation failed for sources \(failedTapSourceIDs.sorted().joined(separator: ",")); likely audio-capture permission not yet granted; \(failedMixIDs.count) mixes offline", level: .error)
+            return RouterStatus(failedMixIDs: failedMixIDs, cause: .permissionPending)
         }
         // Taps dropped here (no longer desired) deinit and unmute their apps —
         // correct: those apps left their group and should hear themselves again.
@@ -374,11 +379,12 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         router = nil
         let aggregateSignpostID = engineSignposter.makeSignpostID()
         let aggregateSignpostState = engineSignposter.beginInterval("CoreAudioEngine.rebuildAggregate", id: aggregateSignpostID)
-        guard let agg = RouterAggregate(outputUID: outputUID, taps: orderedTaps) else {
+        var aggregateFailure: RouterAggregate.BuildFailure?
+        guard let agg = RouterAggregate(outputUID: outputUID, taps: orderedTaps, failure: &aggregateFailure) else {
             engineSignposter.endInterval("CoreAudioEngine.rebuildAggregate", aggregateSignpostState)
-            bamLog("startRouter: aggregate build failed (\(orderedTaps.count) taps, output \(outputUID)) — likely audio-capture permission not yet granted; \(config.mixes.count) mixes offline", level: .error)
+            bamLog("startRouter: aggregate build failed (\(orderedTaps.count) taps, output \(outputUID), failure \(String(describing: aggregateFailure))) — \(config.mixes.count) mixes offline", level: .error)
             routerTapSig = nil
-            return RouterStatus(failedMixIDs: config.mixes.map(\.id), cause: .permissionPending)
+            return RouterStatus(failedMixIDs: config.mixes.map(\.id), cause: .buildFailed)
         }
         engineSignposter.endInterval("CoreAudioEngine.rebuildAggregate", aggregateSignpostState)
         applyRouterGains(config, to: agg)
@@ -477,7 +483,6 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         }
 
         var sourceFrameBad: [String] = []
-        var activeInputWithGain = false
         for sourceID in expectedSourceIDs {
             guard let s = sourceHealthByID[sourceID] else { continue }
             let previousFrames = state.lastSourceFrames[sourceID]
@@ -491,26 +496,11 @@ public actor CoreAudioEngine: AudioEngineProtocol {
             if state.sourceStaleSamples[sourceID, default: 0] >= 3 {
                 sourceFrameBad.append(sourceID)
             }
-
-            if s.meter > Self.healthSilenceDB {
-                activeInputWithGain = true
-            }
         }
 
         if !sourceFrameBad.isEmpty {
             bamLog("router health failed: source tap stopped advancing for \(sourceFrameBad.sorted().joined(separator: ",")); rebuilding tap(s)", level: .error)
             recoverRouterAfterHealthFailure(signature: signature, reason: "source tap stalled", resetSourceIDs: Set(sourceFrameBad))
-            return false
-        }
-
-        if activeInputWithGain && h.outputPeak <= Self.healthOutputSilencePeak {
-            state.renderSilentSamples += 1
-        } else {
-            state.renderSilentSamples = 0
-        }
-        if state.renderSilentSamples >= 3 {
-            bamLog("router health failed: active input but silent render peak=\(h.outputPeak); rebuilding aggregate", level: .error)
-            recoverRouterAfterHealthFailure(signature: signature, reason: "silent render")
             return false
         }
 
@@ -533,6 +523,13 @@ public actor CoreAudioEngine: AudioEngineProtocol {
             let channelsChanged = source.channels != expected.channels
             return sampleRateChanged || channelsChanged ? source.sourceID : nil
         })
+    }
+
+    static func mixIDs(referencing sourceIDs: Set<String>, in config: BamConfig) -> [String] {
+        guard !sourceIDs.isEmpty else { return [] }
+        return config.mixes.compactMap { mix in
+            mix.sends.contains { sourceIDs.contains($0.source) } ? mix.id : nil
+        }
     }
 
     private func expectedAudibleSourceIDs(
@@ -585,6 +582,19 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         resetSourceIDs: Set<String> = []
     ) {
         guard routerTapSig == signature, let config = routerConfig else { return }
+        let outputUID = _boundOutputUID
+        let outputVolume = outputUID.flatMap { Self.deviceVolume(uid: $0) }
+        if let outputUID {
+            Self.setDeviceMuted(uid: outputUID, true)
+        }
+        func restoreGuardedOutput() {
+            if let outputUID, let outputVolume {
+                Self.setDeviceVolume(uid: outputUID, outputVolume)
+            }
+            if let outputUID, !config.masterMuted {
+                Self.setDeviceMuted(uid: outputUID, false)
+            }
+        }
         let event = routerRecoveryPolicy.recordAttempt(reason: reason)
         emitRouterRecoveryEvent(event)
         routerHealthTask?.cancel()
@@ -593,6 +603,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
             router = nil
             routerTapSig = nil
             routerHealthBaseline = nil
+            restoreGuardedOutput()
             return
         }
         for sourceID in resetSourceIDs {
@@ -603,6 +614,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         routerHealthBaseline = nil
         bamLog("router recovery: \(reason)")
         _ = startRouter(config: config)
+        restoreGuardedOutput()
     }
 
     // MARK: router recovery events

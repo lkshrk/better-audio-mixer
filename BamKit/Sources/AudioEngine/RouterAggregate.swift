@@ -10,6 +10,12 @@ import Foundation
 /// race. The taps are `.mutedWhenTapped`, so each captured app's own output is
 /// silenced and only bam's summed mix reaches the hardware.
 final class RouterAggregate {
+    enum BuildFailure: Equatable {
+        case createAggregate(OSStatus)
+        case createIOProc(OSStatus)
+        case startIO(OSStatus)
+    }
+
     struct HealthSnapshot: Equatable {
         let fires: Int
         let inputBuffers: Int
@@ -94,8 +100,9 @@ final class RouterAggregate {
     private let dOutFrames = ManagedAtomic<Int>(0)
     private let dOutPeak = ManagedAtomic<UInt32>(0)
     private let dLimiterHits = ManagedAtomic<Int>(0)
+    private var buildFailure: BuildFailure?
 
-    init?(outputUID: String, taps orderedTaps: [Tap]) {
+    init?(outputUID: String, taps orderedTaps: [Tap], failure: inout BuildFailure?) {
         guard !orderedTaps.isEmpty else { return nil }
         self.taps = orderedTaps
 
@@ -109,9 +116,11 @@ final class RouterAggregate {
         self.channelMap = cmap
 
         guard createAggregate(outputUID: outputUID), startIO() else {
+            failure = buildFailure
             teardown()
             return nil
         }
+        failure = nil
     }
 
     deinit { teardown() }
@@ -183,7 +192,9 @@ final class RouterAggregate {
         engineLog.debug(
             "router createAggregate out=\(outputUID, privacy: .private) taps=\(self.taps.count, privacy: .public) inChans=\(self.channelMap.count, privacy: .public) status=\(st, privacy: .public) aggID=\(self.aggregateID, privacy: .public)"
         )
-        return st == noErr && aggregateID != AudioObjectID(kAudioObjectUnknown)
+        let ok = st == noErr && aggregateID != AudioObjectID(kAudioObjectUnknown)
+        if !ok { buildFailure = .createAggregate(st) }
+        return ok
     }
 
     private func startIO() -> Bool {
@@ -433,10 +444,12 @@ final class RouterAggregate {
         let cst = AudioDeviceCreateIOProcIDWithBlock(&ioProcID, aggregateID, nil, block)
         guard cst == noErr, ioProcID != nil else {
             bamLog("router createIOProc FAILED status=\(cst)")
+            buildFailure = .createIOProc(cst)
             return false
         }
         let sst = AudioDeviceStart(aggregateID, ioProcID)
         bamLog("router startIO createStatus=\(cst) startStatus=\(sst) expectInChans=\(mapCount)")
+        if sst != noErr { buildFailure = .startIO(sst) }
 
         Task { [dFires, dInBufs, dInCh0, dInChTotal, dInFrames, dOutBufs, dOutCh, dOutFrames, dOutPeak, dLimiterHits] in
             for _ in 0..<6 {

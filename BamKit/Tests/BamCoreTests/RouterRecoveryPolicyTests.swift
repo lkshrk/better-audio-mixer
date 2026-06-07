@@ -30,9 +30,9 @@ final class RouterRecoveryPolicyTests: XCTestCase {
         var policy = RouterRecoveryPolicy(maxAttempts: 1, window: 120, cooldown: 300)
         let start = Date(timeIntervalSince1970: 1_000)
 
-        _ = policy.recordAttempt(reason: "silent render", now: start)
-        XCTAssertEqual(policy.recordAttempt(reason: "silent render", now: start.addingTimeInterval(10)), .paused(
-            reason: "silent render",
+        _ = policy.recordAttempt(reason: "source tap stalled", now: start)
+        XCTAssertEqual(policy.recordAttempt(reason: "source tap stalled", now: start.addingTimeInterval(10)), .paused(
+            reason: "source tap stalled",
             attempts: 1,
             window: 120,
             cooldown: 300
@@ -40,8 +40,8 @@ final class RouterRecoveryPolicyTests: XCTestCase {
 
         policy.reset()
 
-        XCTAssertEqual(policy.recordAttempt(reason: "silent render", now: start.addingTimeInterval(20)), .attempting(
-            reason: "silent render",
+        XCTAssertEqual(policy.recordAttempt(reason: "source tap stalled", now: start.addingTimeInterval(20)), .attempting(
+            reason: "source tap stalled",
             attempt: 1
         ))
     }

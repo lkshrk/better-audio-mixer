@@ -9,9 +9,9 @@ public enum RouterFailureCause: String, Sendable, Equatable {
     /// No hardware destination and no system default output to mix into.
     /// Heals when an output device appears (device-list change).
     case noOutput
-    /// Taps exist but the aggregate could not be built — almost always the
-    /// audio-capture (TCC) consent not yet granted. Heals when the user accepts;
-    /// that grant fires no CoreAudio list change, so only a heartbeat catches it.
+    /// A process tap could not be created — usually because audio-capture (TCC)
+    /// consent is still pending. Heals when the user accepts; that grant fires no
+    /// CoreAudio list change, so only a heartbeat catches it.
     case permissionPending
     /// No grouped app is currently producing audio, so there is nothing to tap.
     /// Not an error: the devices are idle, not broken. Heals when an app starts

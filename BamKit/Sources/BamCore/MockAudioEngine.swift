@@ -1,6 +1,18 @@
 import Foundation
 
 public actor MockAudioEngine: AudioEngineProtocol {
+    public enum Call: Equatable, Sendable {
+        case setOutputVolume(uid: String, volume: Float)
+        case setOutputMuted(uid: String, muted: Bool)
+        case startRouter
+    }
+
+    public private(set) var calls: [Call] = []
+
+    public func resetCalls() {
+        calls = []
+    }
+
     /// When true, the router meter stream reports floor-level (silent) sources —
     /// simulating taps that are running but not yet capturing (e.g. before the
     /// capture-permission popup is accepted). Lets tests exercise the launch
@@ -21,11 +33,18 @@ public actor MockAudioEngine: AudioEngineProtocol {
 
     private var mockVolume: Float = 0.8
     public func outputVolume(uid: String) -> Float? { mockVolume }
-    public func setOutputVolume(uid: String, _ volume: Float) { mockVolume = max(0, min(1, volume)) }
+    public func setOutputVolume(uid: String, _ volume: Float) {
+        let clamped = max(0, min(1, volume))
+        calls.append(.setOutputVolume(uid: uid, volume: clamped))
+        mockVolume = clamped
+    }
 
     private var mockMuted = false
     public func outputMuted(uid: String) -> Bool { mockMuted }
-    public func setOutputMuted(uid: String, _ muted: Bool) { mockMuted = muted }
+    public func setOutputMuted(uid: String, _ muted: Bool) {
+        calls.append(.setOutputMuted(uid: uid, muted: muted))
+        mockMuted = muted
+    }
 
     public func runningAudioApps() -> [AudioApp] {
         routerConfig?.sources
@@ -69,6 +88,7 @@ public actor MockAudioEngine: AudioEngineProtocol {
         }
         routerConfig = config
         startRouterCalls += 1
+        calls.append(.startRouter)
         return scriptedRouterStatuses.isEmpty ? .ok : scriptedRouterStatuses.removeFirst()
     }
 
