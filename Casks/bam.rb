@@ -7,7 +7,7 @@ cask "bam" do
   desc "Per-app audio mixer and router for macOS"
   homepage "https://github.com/lkshrk/better-audio-mixer"
 
-  depends_on macos: ">= :sonoma"
+  depends_on macos: :sonoma
 
   app "bam.app"
 
