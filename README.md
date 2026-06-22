@@ -24,6 +24,7 @@ SIP changes.
 ### Homebrew
 
 ```sh
+brew tap lkshrk/tap
 brew install --cask lkshrk/tap/bam
 ```
 
