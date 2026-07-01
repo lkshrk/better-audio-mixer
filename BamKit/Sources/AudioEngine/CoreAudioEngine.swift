@@ -589,10 +589,12 @@ public actor CoreAudioEngine: AudioEngineProtocol {
             && sourceFrameBad.isEmpty
             && formatBad.isEmpty
         if healthy {
-            state.healthyStreak += 1
-            if state.healthyStreak == 5 {   // ~10s at the 2s poll
-                routerRecoveryPolicy.reset()
-                bamLog("router recovery budget reset after sustained health")
+            if state.healthyStreak < 5 {
+                state.healthyStreak += 1
+                if state.healthyStreak == 5 {
+                    routerRecoveryPolicy.reset()
+                    bamLog("router recovery budget reset after sustained health")
+                }
             }
         } else {
             state.healthyStreak = 0
@@ -684,10 +686,6 @@ public actor CoreAudioEngine: AudioEngineProtocol {
             router = nil
             routerTapSig = nil
             routerHealthBaseline = nil
-            if let outputUID {
-                let uids: Set<String> = [outputUID]
-                performGuardedOutputRebuild(uids: uids, unmute: !config.masterMuted) {}
-            }
             if case .paused = event { scheduleRecoveryRearm(reason: reason, signature: signature) }
             return
         }

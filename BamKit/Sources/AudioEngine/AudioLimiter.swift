@@ -1,12 +1,5 @@
 import Foundation
 
-struct LimiterConfig {
-    var attackMs: Float = 1
-    var releaseMs: Float = 100
-    var lookaheadMs: Float = 1.5
-    var ceiling: Float = 1.0
-}
-
 enum AudioLimiter {}
 
 extension AudioLimiter {

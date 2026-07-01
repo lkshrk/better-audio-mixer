@@ -78,7 +78,6 @@ final class RouterAggregate {
     private var cntRScratch: UnsafeMutablePointer<Int>?
     private var chTapScratch: UnsafeMutablePointer<Int>?
     private var chRightScratch: UnsafeMutablePointer<Int>?
-    private var limiterGainScratch: UnsafeMutablePointer<Float>?
     /// Frames elapsed since this aggregate's IOProc started, used for the
     /// start-up fade-in. Single-writer (the audio thread), so a plain pointer is
     /// safe and lock-free; no atomic needed.
@@ -86,7 +85,6 @@ final class RouterAggregate {
     // Lookahead limiter state — all preallocated in startIO, freed in teardown.
     private var laRingScratch: UnsafeMutablePointer<Float>?   // laFrames*2 floats (L then R section)
     private var laIdxScratch: UnsafeMutablePointer<Int>?      // write index [0, laFrames)
-    private var laFramesScratch: UnsafeMutablePointer<Int>?   // lookahead depth in frames
     private var laEnvScratch: UnsafeMutablePointer<Float>?    // current envelope [0,1]
     private var laAttackScratch: UnsafeMutablePointer<Float>? // precomputed attack coeff
     private var laReleaseScratch: UnsafeMutablePointer<Float>?// precomputed release coeff
@@ -247,10 +245,6 @@ final class RouterAggregate {
         played.initialize(to: 0)
         playedScratch = played
         let fadeIn = Self.fadeInFrames
-        let limiterGain = UnsafeMutablePointer<Float>.allocate(capacity: 1)
-        limiterGain.initialize(to: 1)
-        limiterGainScratch = limiterGain
-
         let outSR = CA.float64(aggregateID, CA.address(kAudioDevicePropertyNominalSampleRate)) ?? 48000
         let laFrames = AudioLimiter.lookaheadFrames(sampleRate: outSR, lookaheadMs: 1.5)
         // Two sections: [0, laFrames) = L channel, [laFrames, 2*laFrames) = R channel.
@@ -260,9 +254,6 @@ final class RouterAggregate {
         let laIdx = UnsafeMutablePointer<Int>.allocate(capacity: 1)
         laIdx.initialize(to: 0)
         laIdxScratch = laIdx
-        let laFramesPtr = UnsafeMutablePointer<Int>.allocate(capacity: 1)
-        laFramesPtr.initialize(to: laFrames)
-        laFramesScratch = laFramesPtr
         let laEnv = UnsafeMutablePointer<Float>.allocate(capacity: 1)
         laEnv.initialize(to: 1)
         laEnvScratch = laEnv
@@ -592,10 +583,8 @@ final class RouterAggregate {
         chTapScratch?.deallocate(); chTapScratch = nil
         chRightScratch?.deallocate(); chRightScratch = nil
         playedScratch?.deallocate(); playedScratch = nil
-        limiterGainScratch?.deallocate(); limiterGainScratch = nil
         laRingScratch?.deallocate(); laRingScratch = nil
         laIdxScratch?.deallocate(); laIdxScratch = nil
-        laFramesScratch?.deallocate(); laFramesScratch = nil
         laEnvScratch?.deallocate(); laEnvScratch = nil
         laAttackScratch?.deallocate(); laAttackScratch = nil
         laReleaseScratch?.deallocate(); laReleaseScratch = nil

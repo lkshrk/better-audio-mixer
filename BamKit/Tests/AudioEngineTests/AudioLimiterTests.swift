@@ -20,7 +20,7 @@ final class AudioLimiterTests: XCTestCase {
         let upRelease  = AudioLimiter.nextEnvelope(current: 0.5, targetGain: 1.0, attackCoeff: a, releaseCoeff: r)
         XCTAssertLessThan(downAttack, 1.0)
         XCTAssertGreaterThan(upRelease, 0.5)
-        XCTAssertLessThan(1.0 - downAttack, 1.0)          // moved down
+        XCTAssertGreaterThan(1.0 - downAttack, upRelease - 0.5)
         XCTAssertTrue(upRelease < 1.0)                     // release not instant
     }
 
