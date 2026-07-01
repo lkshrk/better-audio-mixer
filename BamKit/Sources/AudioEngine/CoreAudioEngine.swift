@@ -477,7 +477,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
             .filter { $0.value >= 2 }
             .map(\.key)
         if !formatBad.isEmpty {
-            bamLog("router health failed: tap format changed for \(formatBad.sorted().joined(separator: ",")); rebuilding tap(s)", level: .error)
+            bamLog("router health failed: tap format changed for \(formatBad.sorted().joined(separator: ",")); dropping tap cache and rebuilding aggregate", level: .error)
             recoverRouterAfterHealthFailure(signature: signature, reason: "tap format drift", resetSourceIDs: Set(formatBad))
             return false
         }
@@ -499,7 +499,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         }
 
         if !sourceFrameBad.isEmpty {
-            bamLog("router health failed: source tap stopped advancing for \(sourceFrameBad.sorted().joined(separator: ",")); rebuilding tap(s)", level: .error)
+            bamLog("router health failed: source tap stopped advancing for \(sourceFrameBad.sorted().joined(separator: ",")); dropping tap cache and rebuilding aggregate", level: .error)
             recoverRouterAfterHealthFailure(signature: signature, reason: "source tap stalled", resetSourceIDs: Set(sourceFrameBad))
             return false
         }
