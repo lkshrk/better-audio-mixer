@@ -1,3 +1,4 @@
+import Accelerate
 import Atomics
 import BamCore
 import CoreAudio
@@ -82,6 +83,13 @@ final class RouterAggregate {
     /// start-up fade-in. Single-writer (the audio thread), so a plain pointer is
     /// safe and lock-free; no atomic needed.
     private var playedScratch: UnsafeMutablePointer<Int>?
+    // Lookahead limiter state — all preallocated in startIO, freed in teardown.
+    private var laRingScratch: UnsafeMutablePointer<Float>?   // laFrames*2 floats (L then R section)
+    private var laIdxScratch: UnsafeMutablePointer<Int>?      // write index [0, laFrames)
+    private var laFramesScratch: UnsafeMutablePointer<Int>?   // lookahead depth in frames
+    private var laEnvScratch: UnsafeMutablePointer<Float>?    // current envelope [0,1]
+    private var laAttackScratch: UnsafeMutablePointer<Float>? // precomputed attack coeff
+    private var laReleaseScratch: UnsafeMutablePointer<Float>?// precomputed release coeff
 
     /// Fade-in length in frames (~43 ms at 48 kHz). The summed output is ramped
     /// 0→1 over the first taps after the aggregate goes live so a freshly started
@@ -243,6 +251,28 @@ final class RouterAggregate {
         limiterGain.initialize(to: 1)
         limiterGainScratch = limiterGain
 
+        let outSR = CA.float64(aggregateID, CA.address(kAudioDevicePropertyNominalSampleRate)) ?? 48000
+        let laFrames = AudioLimiter.lookaheadFrames(sampleRate: outSR, lookaheadMs: 1.5)
+        // Two sections: [0, laFrames) = L channel, [laFrames, 2*laFrames) = R channel.
+        let laRing = UnsafeMutablePointer<Float>.allocate(capacity: laFrames * 2)
+        laRing.initialize(repeating: 0, count: laFrames * 2)
+        laRingScratch = laRing
+        let laIdx = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        laIdx.initialize(to: 0)
+        laIdxScratch = laIdx
+        let laFramesPtr = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        laFramesPtr.initialize(to: laFrames)
+        laFramesScratch = laFramesPtr
+        let laEnv = UnsafeMutablePointer<Float>.allocate(capacity: 1)
+        laEnv.initialize(to: 1)
+        laEnvScratch = laEnv
+        let laAttack = UnsafeMutablePointer<Float>.allocate(capacity: 1)
+        laAttack.initialize(to: AudioLimiter.attackCoeff(sampleRate: outSR, ms: 1))
+        laAttackScratch = laAttack
+        let laRelease = UnsafeMutablePointer<Float>.allocate(capacity: 1)
+        laRelease.initialize(to: AudioLimiter.releaseCoeff(sampleRate: outSR, ms: 100))
+        laReleaseScratch = laRelease
+
         let gainL = taps.map(\.gainL)
         let gainR = taps.map(\.gainR)
         let meters = taps.map(\.meter)
@@ -256,6 +286,8 @@ final class RouterAggregate {
         let dOutBufs = self.dOutBufs, dOutCh = self.dOutCh
         let dOutFrames = self.dOutFrames, dOutPeak = self.dOutPeak
         let dLimiterHits = self.dLimiterHits
+        let laRingC = laRing, laIdxC = laIdx, laFramesC = laFrames
+        let laEnvC = laEnv, laAttackC = laAttack, laReleaseC = laRelease
 
         let block: AudioDeviceIOBlock = { _, inInputData, _, outOutputData, _ in
             let inABL = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inInputData))
@@ -371,11 +403,9 @@ final class RouterAggregate {
                 mt += 1
             }
 
-            // Start-up fade-in (declick) + peak limiter. The limiter scales the
-            // whole buffer instead of hard-clipping individual samples, preserving
-            // low-frequency waveform shape when multiple sources sum above 0 dBFS.
+            // Start-up fade-in (declick). Applied before the lookahead limiter so
+            // the ramp is preserved even if the limiter is active on startup.
             let playedNow = played[0]
-            var peak: Float = 0
             var rp = 0
             while rp < outABL.count {
                 let b = outABL[rp]
@@ -387,40 +417,131 @@ final class RouterAggregate {
                     while i < n {
                         let frame = i / ch
                         let r = playedNow + frame
-                        let ramp = r >= fadeIn ? 1 : Float(r) / Float(fadeIn)
-                        let v = p[i] * ramp
-                        p[i] = v
-                        let a = v < 0 ? -v : v
-                        if a > peak { peak = a }
+                        let ramp = r >= fadeIn ? Float(1) : Float(r) / Float(fadeIn)
+                        p[i] *= ramp
                         i += 1
                     }
                 }
                 rp += 1
             }
-            let targetScale = AudioLimiter.scale(forPeak: peak)
-            let limitScale = AudioLimiter.nextScale(current: limiterGain[0], target: targetScale)
-            limiterGain[0] = limitScale
-            if limitScale < 1 {
-                if targetScale < 1 {
-                    dLimiterHits.wrappingIncrement(ordering: .relaxed)
-                }
-                var lb = 0
-                while lb < outABL.count {
-                    let b = outABL[lb]
-                    if let data = b.mData {
-                        let n = Int(b.mDataByteSize) / MemoryLayout<Float>.size
-                        let p = data.assumingMemoryBound(to: Float.self)
-                        var li = 0
-                        while li < n {
-                            p[li] *= limitScale
-                            li += 1
-                        }
-                    }
-                    lb += 1
-                }
-                peak *= limitScale
-            }
             played[0] = playedNow + outFrames
+
+            // Lookahead limiter: delay output by laFrames through a per-channel ring,
+            // compute incoming peak, drive envelope, apply to the delayed output.
+            // Ring layout: [0, la) = L-channel frames, [la, 2*la) = R-channel frames.
+            // Each "slot" holds one mono sample; both channels advance the same index
+            // so latency is identical — the accepted ~1.5 ms tradeoff for no pumping.
+            let la = laFramesC
+            let writeIdx = laIdxC[0]
+
+            // Peak over the incoming (pre-delay) output to drive the look-ahead.
+            var incomingPeak: Float = 0
+            if planarStereo {
+                let nL = Int(outABL[0].mDataByteSize) / MemoryLayout<Float>.size
+                if let dL = outABL[0].mData {
+                    let pkL = DSPKernels.peakMagnitudeVDSP(dL.assumingMemoryBound(to: Float.self), count: nL)
+                    if pkL > incomingPeak { incomingPeak = pkL }
+                }
+                if let dR = rightOutData {
+                    let nR = Int(outABL[1].mDataByteSize) / MemoryLayout<Float>.size
+                    let pkR = DSPKernels.peakMagnitudeVDSP(dR.assumingMemoryBound(to: Float.self), count: nR)
+                    if pkR > incomingPeak { incomingPeak = pkR }
+                }
+            } else {
+                let n = Int(outABL[0].mDataByteSize) / MemoryLayout<Float>.size
+                if let d = outABL[0].mData {
+                    let pk = DSPKernels.peakMagnitudeVDSP(d.assumingMemoryBound(to: Float.self), count: n)
+                    if pk > incomingPeak { incomingPeak = pk }
+                }
+            }
+
+            let target = AudioLimiter.targetGain(forPeak: incomingPeak, ceiling: 1.0)
+            let env = AudioLimiter.nextEnvelope(current: laEnvC[0], targetGain: target,
+                                                attackCoeff: laAttackC[0], releaseCoeff: laReleaseC[0])
+            laEnvC[0] = env
+            if env < 1 { dLimiterHits.wrappingIncrement(ordering: .relaxed) }
+
+            // Swap current output with ring contents, then scale by envelope.
+            if planarStereo {
+                // L channel in ring[0..<la], R channel in ring[la..<2*la].
+                if let dL = outABL[0].mData {
+                    let pL = dL.assumingMemoryBound(to: Float.self)
+                    var fi = 0
+                    while fi < outFrames {
+                        let slot = (writeIdx + fi) % la
+                        let delayed = laRingC[slot]
+                        laRingC[slot] = pL[fi]
+                        pL[fi] = delayed
+                        fi += 1
+                    }
+                    var gs = env
+                    vDSP_vsmul(pL, 1, &gs, pL, 1, vDSP_Length(outFrames))
+                }
+                if let dR = rightOutData {
+                    let pR = dR.assumingMemoryBound(to: Float.self)
+                    var fi = 0
+                    while fi < outFrames {
+                        let slot = la + (writeIdx + fi) % la
+                        let delayed = laRingC[slot]
+                        laRingC[slot] = pR[fi]
+                        pR[fi] = delayed
+                        fi += 1
+                    }
+                    var gs = env
+                    vDSP_vsmul(pR, 1, &gs, pR, 1, vDSP_Length(outFrames))
+                }
+            } else {
+                // Interleaved: delay frame-by-frame. L ring[0..<la], R ring[la..<2*la].
+                // For mono (firstOutCh==1) only the L ring is used.
+                let p = out
+                if firstOutCh == 1 {
+                    var fi = 0
+                    while fi < outFrames {
+                        let slot = (writeIdx + fi) % la
+                        let delayed = laRingC[slot]
+                        laRingC[slot] = p[fi]
+                        p[fi] = delayed
+                        fi += 1
+                    }
+                    var gs = env
+                    vDSP_vsmul(p, 1, &gs, p, 1, vDSP_Length(outFrames))
+                } else {
+                    // Interleaved stereo: deinterleave into L/R rings, delay, reinterleave.
+                    var fi = 0
+                    while fi < outFrames {
+                        let slotL = (writeIdx + fi) % la
+                        let slotR = la + (writeIdx + fi) % la
+                        let delayedL = laRingC[slotL]
+                        let delayedR = laRingC[slotR]
+                        laRingC[slotL] = p[fi * firstOutCh]
+                        laRingC[slotR] = p[fi * firstOutCh + 1]
+                        p[fi * firstOutCh]     = delayedL * env
+                        p[fi * firstOutCh + 1] = delayedR * env
+                        fi += 1
+                    }
+                }
+            }
+            laIdxC[0] = (writeIdx + outFrames) % la
+
+            // Post-limiter peak for diagnostics.
+            var peak: Float = 0
+            if planarStereo {
+                let nL = Int(outABL[0].mDataByteSize) / MemoryLayout<Float>.size
+                if let dL = outABL[0].mData {
+                    let pk = DSPKernels.peakMagnitudeVDSP(dL.assumingMemoryBound(to: Float.self), count: nL)
+                    if pk > peak { peak = pk }
+                }
+                if let dR = rightOutData {
+                    let nR = Int(outABL[1].mDataByteSize) / MemoryLayout<Float>.size
+                    let pk = DSPKernels.peakMagnitudeVDSP(dR.assumingMemoryBound(to: Float.self), count: nR)
+                    if pk > peak { peak = pk }
+                }
+            } else {
+                let n = Int(outABL[0].mDataByteSize) / MemoryLayout<Float>.size
+                if let d = outABL[0].mData {
+                    peak = DSPKernels.peakMagnitudeVDSP(d.assumingMemoryBound(to: Float.self), count: n)
+                }
+            }
             dFires.wrappingIncrement(ordering: .relaxed)
             dInBufs.store(nBufs, ordering: .relaxed)
             dInCh0.store(nBufs > 0 ? Int(inABL[0].mNumberChannels) : 0, ordering: .relaxed)
@@ -472,5 +593,11 @@ final class RouterAggregate {
         chRightScratch?.deallocate(); chRightScratch = nil
         playedScratch?.deallocate(); playedScratch = nil
         limiterGainScratch?.deallocate(); limiterGainScratch = nil
+        laRingScratch?.deallocate(); laRingScratch = nil
+        laIdxScratch?.deallocate(); laIdxScratch = nil
+        laFramesScratch?.deallocate(); laFramesScratch = nil
+        laEnvScratch?.deallocate(); laEnvScratch = nil
+        laAttackScratch?.deallocate(); laAttackScratch = nil
+        laReleaseScratch?.deallocate(); laReleaseScratch = nil
     }
 }

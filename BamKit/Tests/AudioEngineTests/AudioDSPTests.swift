@@ -39,18 +39,6 @@ final class AudioDSPTests: XCTestCase {
         XCTAssertEqual(rms(right), rms(input), accuracy: 1e-5)
     }
 
-    func testLimiterLeavesBelowFullScaleAloneAndScalesOverflow() {
-        XCTAssertEqual(AudioLimiter.scale(forPeak: 0.8), 1, accuracy: 1e-6)
-        XCTAssertEqual(AudioLimiter.scale(forPeak: 1.0), 1, accuracy: 1e-6)
-        XCTAssertEqual(AudioLimiter.scale(forPeak: 2.0), 0.5, accuracy: 1e-6)
-    }
-
-    func testLimiterAttacksImmediatelyAndReleasesSmoothly() {
-        XCTAssertEqual(AudioLimiter.nextScale(current: 1, target: 0.5), 0.5, accuracy: 1e-6)
-        XCTAssertEqual(AudioLimiter.nextScale(current: 0.5, target: 1), 0.505, accuracy: 1e-6)
-        XCTAssertEqual(AudioLimiter.nextScale(current: 0.5, target: 1, release: 1), 1, accuracy: 1e-6)
-    }
-
     func testTapCaptureFollowsMacOSDefaultNotBamRenderTarget() {
         XCTAssertEqual(
             CoreAudioEngine.tapCaptureOutputUID(targetOutputUID: "Speakers", defaultOutputUID: "Razer"),
