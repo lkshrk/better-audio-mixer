@@ -477,8 +477,13 @@ public actor CoreAudioEngine: AudioEngineProtocol {
             emitRouterRecoveryEvent(.recovered)
         }
         if outputChanged {
-            let guarded: Set<String> = Set([previousBoundUID, outputUID].compactMap { $0 })
-            performGuardedOutputRebuild(uids: guarded, unmute: !config.masterMuted, doRebuild)
+            // A switch is caller-driven (the view model mutes both devices before
+            // this call and ramps the new output up afterward). Mute both across the
+            // rebuild but do NOT unmute here — the guard's unmute would briefly play
+            // the device at its (user-max) hardware volume before the caller's fade,
+            // which is the switch "crack"/blast. The caller owns the unmute.
+            if let previousBoundUID { Self.resolvedSetDeviceMuted(uid: previousBoundUID, true) }
+            performGuardedOutputRebuild(uids: [outputUID], unmute: false, doRebuild)
         } else {
             doRebuild()
         }

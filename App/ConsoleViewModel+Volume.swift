@@ -65,10 +65,6 @@ extension ConsoleViewModel {
             CoreAudioEngine.setDeviceMuted(uid: uid, true)
             await model.engine.setOutputVolume(uid: uid, 0)
             model.outputVolume = 0
-            if let previous, previous != uid {
-                await model.engine.setOutputVolume(uid: previous, Float(target))
-                await model.engine.setOutputMuted(uid: previous, false)
-            }
 
             if muted {
                 await model.engine.setOutputVolume(uid: uid, Float(target))
@@ -76,6 +72,14 @@ extension ConsoleViewModel {
             } else {
                 CoreAudioEngine.setDeviceMuted(uid: uid, false)
                 await model.rampOutputVolume(uid: uid, from: 0, to: target)
+            }
+
+            // Unmute the previous device LAST — only after the new output has faded
+            // in. It is the macOS default where apps still emit; unmuting it at its
+            // (user-max) volume mid-swap briefly plays that audio un-attenuated.
+            if let previous, previous != uid {
+                await model.engine.setOutputVolume(uid: previous, Float(target))
+                await model.engine.setOutputMuted(uid: previous, false)
             }
         }
     }
