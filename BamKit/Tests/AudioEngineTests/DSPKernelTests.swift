@@ -87,6 +87,7 @@ final class DSPKernelTests: XCTestCase {
             XCTAssertEqual(dstA[i * 2 + 1], 0.25, "R lane modified by scalar at frame \(i)")
             XCTAssertEqual(dstB[i * 2 + 1], 0.25, "R lane modified by vDSP at frame \(i)")
         }
+        XCTAssertNotEqual(dstA[0], 0.25, "L lane unchanged — kernel wrote nothing")
     }
 
     func testSumOfSquaresNonUnitStride() {

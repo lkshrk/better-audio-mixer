@@ -71,5 +71,6 @@ final class AudioLimiterTests: XCTestCase {
         // After the same 400 steps that settled the attack, release must NOT yet reach 0.99 —
         // 100ms time-constant means only ~0.8% elapsed, so env should still be well below 0.60.
         XCTAssertLessThan(env, 0.60, "release too fast: env=\(env) after \(n) steps")
+        XCTAssertGreaterThan(env, settledEnv, "release did not move the envelope at all")
     }
 }
