@@ -84,6 +84,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         var sourceFormatDriftSamples: [String: Int] = [:]
         var lastSourceFrames: [String: Int] = [:]
         var sourceStaleSamples: [String: Int] = [:]
+        var healthyStreak = 0
     }
 
     private static let healthGainFloor: Double = 0.0001
@@ -505,6 +506,21 @@ public actor CoreAudioEngine: AudioEngineProtocol {
             return false
         }
 
+        // A fully-clean sample: nothing stale, no drift, no idle source flagged.
+        let healthy = state.staleSamples == 0
+            && state.noInputSamples == 0
+            && state.outputFormatDriftSamples == 0
+            && sourceFrameBad.isEmpty
+            && formatBad.isEmpty
+        if healthy {
+            state.healthyStreak += 1
+            if state.healthyStreak == 5 {   // ~10s at the 2s poll
+                routerRecoveryPolicy.reset()
+                bamLog("router recovery budget reset after sustained health")
+            }
+        } else {
+            state.healthyStreak = 0
+        }
         return true
     }
 
