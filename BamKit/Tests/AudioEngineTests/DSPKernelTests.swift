@@ -54,4 +54,48 @@ final class DSPKernelTests: XCTestCase {
         }
         XCTAssertFalse(ss.isNaN)
     }
+
+    // Verify scalar==vDSP when reading a non-unit source stride (interleaved layout) and
+    // writing a non-unit dst stride — the IOProc uses exactly this access pattern.
+    func testSumScaledNonUnitStride() {
+        let frames = 256
+        // Build interleaved stereo: [L0, R0, L1, R1, ...] using the same LCG helper.
+        let interleaved = randomBuffer(frames * 2, seed: 7)
+        let gain: Float = 0.72
+        // dstA/dstB mirror an interleaved output; pre-fill a non-zero value to prove
+        // accumulation (not overwrite) and that the untouched R lane is unchanged.
+        var dstA = [Float](repeating: 0.25, count: frames * 2)
+        var dstB = dstA
+
+        interleaved.withUnsafeBufferPointer { sp in
+            let srcBase = sp.baseAddress!
+            dstA.withUnsafeMutableBufferPointer { ap in
+                // read L lane (stride 2), write L lane (dstStride 2)
+                DSPKernels.sumScaledScalar(src: srcBase, stride: 2, gain: gain,
+                                           dst: ap.baseAddress!, dstStride: 2, frames: frames)
+            }
+            dstB.withUnsafeMutableBufferPointer { bp in
+                DSPKernels.sumScaledVDSP(src: srcBase, stride: 2, gain: gain,
+                                         dst: bp.baseAddress!, dstStride: 2, frames: frames)
+            }
+        }
+
+        for i in 0..<frames {
+            // L lane: scalar and vDSP must agree within float tolerance
+            XCTAssertLessThan(abs(dstA[i * 2] - dstB[i * 2]), 1e-6, "L lane mismatch at frame \(i)")
+            // R lane (odd indices): must be untouched — still 0.25
+            XCTAssertEqual(dstA[i * 2 + 1], 0.25, "R lane modified by scalar at frame \(i)")
+            XCTAssertEqual(dstB[i * 2 + 1], 0.25, "R lane modified by vDSP at frame \(i)")
+        }
+    }
+
+    func testSumOfSquaresNonUnitStride() {
+        let frames = 256
+        let interleaved = randomBuffer(frames * 2, seed: 8)
+        let (ss, vv): (Float, Float) = interleaved.withUnsafeBufferPointer { sp in
+            (DSPKernels.sumOfSquaresScalar(src: sp.baseAddress!, stride: 2, frames: frames),
+             DSPKernels.sumOfSquaresVDSP(src: sp.baseAddress!, stride: 2, frames: frames))
+        }
+        XCTAssertLessThan(abs(ss - vv) / max(1, ss), 1e-6)
+    }
 }
