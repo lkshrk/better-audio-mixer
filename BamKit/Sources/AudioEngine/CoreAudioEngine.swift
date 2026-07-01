@@ -451,7 +451,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
 
         if state.staleSamples >= 3 || state.noInputSamples >= 3 {
             bamLog("router health failed: fires=\(h.fires) inBufs=\(h.inputBuffers) inCh=\(h.inputChannels) inFrames=\(h.inputFrames) outBufs=\(h.outputBuffers) outCh=\(h.outputChannels) outFrames=\(h.outputFrames); rebuilding aggregate", level: .error)
-            recoverRouterAfterHealthFailure(signature: signature, reason: "aggregate stalled")
+            recoverRouterAfterHealthFailure(signature: signature, reason: .aggregateStalled)
             return false
         }
 
@@ -462,7 +462,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         }
         if state.outputFormatDriftSamples >= 2 {
             bamLog("router health failed: output format/sample-rate changed; rebuilding aggregate", level: .error)
-            recoverRouterAfterHealthFailure(signature: signature, reason: "output format drift")
+            recoverRouterAfterHealthFailure(signature: signature, reason: .outputFormatDrift)
             return false
         }
 
@@ -478,7 +478,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
             .map(\.key)
         if !formatBad.isEmpty {
             bamLog("router health failed: tap format changed for \(formatBad.sorted().joined(separator: ",")); dropping tap cache and rebuilding aggregate", level: .error)
-            recoverRouterAfterHealthFailure(signature: signature, reason: "tap format drift", resetSourceIDs: Set(formatBad))
+            recoverRouterAfterHealthFailure(signature: signature, reason: .tapFormatDrift, resetSourceIDs: Set(formatBad))
             return false
         }
 
@@ -500,7 +500,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
 
         if !sourceFrameBad.isEmpty {
             bamLog("router health failed: source tap stopped advancing for \(sourceFrameBad.sorted().joined(separator: ",")); dropping tap cache and rebuilding aggregate", level: .error)
-            recoverRouterAfterHealthFailure(signature: signature, reason: "source tap stalled", resetSourceIDs: Set(sourceFrameBad))
+            recoverRouterAfterHealthFailure(signature: signature, reason: .sourceTapStalled, resetSourceIDs: Set(sourceFrameBad))
             return false
         }
 
@@ -578,7 +578,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
 
     private func recoverRouterAfterHealthFailure(
         signature: String,
-        reason: String,
+        reason: RecoveryReason,
         resetSourceIDs: Set<String> = []
     ) {
         guard routerTapSig == signature, let config = routerConfig else { return }
@@ -612,7 +612,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         router = nil
         routerTapSig = nil
         routerHealthBaseline = nil
-        bamLog("router recovery: \(reason)")
+        bamLog("router recovery: \(reason.rawValue)")
         _ = startRouter(config: config)
         restoreGuardedOutput()
     }
