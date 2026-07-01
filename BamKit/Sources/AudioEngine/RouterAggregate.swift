@@ -324,30 +324,21 @@ final class RouterAggregate {
                         let tIdx = chTap[gc]
                         let isR = chRight[gc] == 1
                         let g = isR ? gainR[tIdx].load() : gainL[tIdx].load()
-                        var ss: Float = 0
-                        var f = 0
+                        let srcBase = p + localCh
+                        let ss: Float
                         if planarStereo, isR, let rightOut {
-                            while f < frames {
-                                let s = p[f * bch + localCh]
-                                ss += s * s
-                                rightOut[f] += s * g
-                                f += 1
-                            }
+                            DSPKernels.sumScaledVDSP(src: srcBase, stride: bch, gain: g,
+                                                     dst: rightOut, dstStride: 1, frames: frames)
+                            ss = DSPKernels.sumOfSquaresVDSP(src: srcBase, stride: bch, frames: frames)
                         } else if planarStereo {
-                            while f < frames {
-                                let s = p[f * bch + localCh]
-                                ss += s * s
-                                out[f] += s * g
-                                f += 1
-                            }
+                            DSPKernels.sumScaledVDSP(src: srcBase, stride: bch, gain: g,
+                                                     dst: out, dstStride: 1, frames: frames)
+                            ss = DSPKernels.sumOfSquaresVDSP(src: srcBase, stride: bch, frames: frames)
                         } else {
                             let dstCh = firstOutCh >= 2 ? (isR ? 1 : 0) : 0
-                            while f < frames {
-                                let s = p[f * bch + localCh]
-                                ss += s * s
-                                out[f * firstOutCh + dstCh] += s * g
-                                f += 1
-                            }
+                            DSPKernels.sumScaledVDSP(src: srcBase, stride: bch, gain: g,
+                                                     dst: out + dstCh, dstStride: firstOutCh, frames: frames)
+                            ss = DSPKernels.sumOfSquaresVDSP(src: srcBase, stride: bch, frames: frames)
                         }
                         sumSq[tIdx] += ss
                         cnt[tIdx] += frames
