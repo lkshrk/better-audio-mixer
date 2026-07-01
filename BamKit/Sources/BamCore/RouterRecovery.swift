@@ -6,13 +6,20 @@ public enum RouterRecoveryEvent: Sendable, Equatable {
     case recovered
 }
 
+public enum RecoveryReason: String, Sendable, Equatable, CaseIterable {
+    case aggregateStalled
+    case outputFormatDrift
+    case tapFormatDrift
+    case sourceTapStalled
+}
+
 public struct RouterRecoveryPolicy: Sendable, Equatable {
     public var maxAttempts: Int
     public var window: TimeInterval
     public var cooldown: TimeInterval
 
-    private var attempts: [Date] = []
-    private var pausedUntil: Date?
+    private var attempts: [RecoveryReason: [Date]] = [:]
+    private var paused: [RecoveryReason: Date] = [:]
 
     public init(maxAttempts: Int = 3, window: TimeInterval = 120, cooldown: TimeInterval = 300) {
         self.maxAttempts = max(1, maxAttempts)
@@ -20,23 +27,30 @@ public struct RouterRecoveryPolicy: Sendable, Equatable {
         self.cooldown = cooldown
     }
 
-    public mutating func recordAttempt(reason: String, now: Date = Date()) -> RouterRecoveryEvent {
-        if let pausedUntil, now < pausedUntil {
-            return .paused(reason: reason, attempts: attempts.count, window: window, cooldown: cooldown)
+    public mutating func recordAttempt(reason: RecoveryReason, now: Date = Date()) -> RouterRecoveryEvent {
+        if let until = paused[reason], now < until {
+            return .paused(reason: reason.rawValue, attempts: attempts[reason]?.count ?? 0,
+                           window: window, cooldown: cooldown)
         }
-
-        attempts = attempts.filter { now.timeIntervalSince($0) <= window }
-        guard attempts.count < maxAttempts else {
-            pausedUntil = now.addingTimeInterval(cooldown)
-            return .paused(reason: reason, attempts: attempts.count, window: window, cooldown: cooldown)
+        var recent = (attempts[reason] ?? []).filter { now.timeIntervalSince($0) <= window }
+        guard recent.count < maxAttempts else {
+            attempts[reason] = recent
+            paused[reason] = now.addingTimeInterval(cooldown)
+            return .paused(reason: reason.rawValue, attempts: recent.count,
+                           window: window, cooldown: cooldown)
         }
+        recent.append(now)
+        attempts[reason] = recent
+        paused[reason] = nil
+        return .attempting(reason: reason.rawValue, attempt: recent.count)
+    }
 
-        attempts.append(now)
-        return .attempting(reason: reason, attempt: attempts.count)
+    public func pausedUntil(for reason: RecoveryReason) -> Date? {
+        paused[reason]
     }
 
     public mutating func reset() {
         attempts.removeAll()
-        pausedUntil = nil
+        paused.removeAll()
     }
 }
