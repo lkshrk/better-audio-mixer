@@ -457,27 +457,15 @@ final class RouterAggregate {
                 // L channel in ring[0..<la], R channel in ring[la..<2*la].
                 if let dL = outABL[0].mData {
                     let pL = dL.assumingMemoryBound(to: Float.self)
-                    var fi = 0
-                    while fi < outFrames {
-                        let slot = (writeIdx + fi) % la
-                        let delayed = laRingC[slot]
-                        laRingC[slot] = pL[fi]
-                        pL[fi] = delayed
-                        fi += 1
-                    }
+                    DSPKernels.ringDelaySwap(io: pL, ioStride: 1, ring: laRingC,
+                                             ringBase: 0, writeIndex: writeIdx, depth: la, frames: outFrames)
                     var gs = env
                     vDSP_vsmul(pL, 1, &gs, pL, 1, vDSP_Length(outFrames))
                 }
                 if let dR = rightOutData {
                     let pR = dR.assumingMemoryBound(to: Float.self)
-                    var fi = 0
-                    while fi < outFrames {
-                        let slot = la + (writeIdx + fi) % la
-                        let delayed = laRingC[slot]
-                        laRingC[slot] = pR[fi]
-                        pR[fi] = delayed
-                        fi += 1
-                    }
+                    DSPKernels.ringDelaySwap(io: pR, ioStride: 1, ring: laRingC,
+                                             ringBase: la, writeIndex: writeIdx, depth: la, frames: outFrames)
                     var gs = env
                     vDSP_vsmul(pR, 1, &gs, pR, 1, vDSP_Length(outFrames))
                 }
@@ -486,30 +474,19 @@ final class RouterAggregate {
                 // For mono (firstOutCh==1) only the L ring is used.
                 let p = out
                 if firstOutCh == 1 {
-                    var fi = 0
-                    while fi < outFrames {
-                        let slot = (writeIdx + fi) % la
-                        let delayed = laRingC[slot]
-                        laRingC[slot] = p[fi]
-                        p[fi] = delayed
-                        fi += 1
-                    }
+                    DSPKernels.ringDelaySwap(io: p, ioStride: 1, ring: laRingC,
+                                             ringBase: 0, writeIndex: writeIdx, depth: la, frames: outFrames)
                     var gs = env
                     vDSP_vsmul(p, 1, &gs, p, 1, vDSP_Length(outFrames))
                 } else {
-                    // Interleaved stereo: deinterleave into L/R rings, delay, reinterleave.
-                    var fi = 0
-                    while fi < outFrames {
-                        let slotL = (writeIdx + fi) % la
-                        let slotR = la + (writeIdx + fi) % la
-                        let delayedL = laRingC[slotL]
-                        let delayedR = laRingC[slotR]
-                        laRingC[slotL] = p[fi * firstOutCh]
-                        laRingC[slotR] = p[fi * firstOutCh + 1]
-                        p[fi * firstOutCh]     = delayedL * env
-                        p[fi * firstOutCh + 1] = delayedR * env
-                        fi += 1
-                    }
+                    DSPKernels.ringDelaySwap(io: p, ioStride: firstOutCh, ring: laRingC,
+                                             ringBase: 0, writeIndex: writeIdx, depth: la, frames: outFrames)
+                    DSPKernels.ringDelaySwap(io: p + 1, ioStride: firstOutCh, ring: laRingC,
+                                             ringBase: la, writeIndex: writeIdx, depth: la, frames: outFrames)
+                    var gsL = env
+                    vDSP_vsmul(p, vDSP_Stride(firstOutCh), &gsL, p, vDSP_Stride(firstOutCh), vDSP_Length(outFrames))
+                    var gsR = env
+                    vDSP_vsmul(p + 1, vDSP_Stride(firstOutCh), &gsR, p + 1, vDSP_Stride(firstOutCh), vDSP_Length(outFrames))
                 }
             }
             laIdxC[0] = (writeIdx + outFrames) % la

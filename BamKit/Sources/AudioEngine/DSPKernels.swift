@@ -49,4 +49,18 @@ enum DSPKernels {
         vDSP_maxmgv(buf, 1, &peak, vDSP_Length(count))
         return peak
     }
+
+    @inline(__always)
+    static func ringDelaySwap(io: UnsafeMutablePointer<Float>, ioStride: Int,
+                              ring: UnsafeMutablePointer<Float>, ringBase: Int,
+                              writeIndex: Int, depth: Int, frames: Int) {
+        var fi = 0
+        while fi < frames {
+            let slot = ringBase + (writeIndex + fi) % depth
+            let d = ring[slot]
+            ring[slot] = io[fi * ioStride]
+            io[fi * ioStride] = d
+            fi += 1
+        }
+    }
 }
