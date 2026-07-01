@@ -53,6 +53,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
     private var routerHealthBaseline: RouterHealthBaseline?
     private var routerHealthTask: Task<Void, Never>?
     private var routerRecoveryPolicy = RouterRecoveryPolicy()
+    private var rearmTasks: [RecoveryReason: Task<Void, Never>] = [:]
     private var routerSamplerTask: Task<Void, Never>?
     /// Live process taps kept ALIVE across topology edits, keyed by source id.
     /// `sig` is the tap's target-process signature; a tap is reused as long as
@@ -604,6 +605,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
             routerTapSig = nil
             routerHealthBaseline = nil
             restoreGuardedOutput()
+            if case .paused = event { scheduleRecoveryRearm(reason: reason, signature: signature) }
             return
         }
         for sourceID in resetSourceIDs {
@@ -615,6 +617,26 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         bamLog("router recovery: \(reason.rawValue)")
         _ = startRouter(config: config)
         restoreGuardedOutput()
+    }
+
+    private func scheduleRecoveryRearm(reason: RecoveryReason, signature: String) {
+        guard let until = routerRecoveryPolicy.pausedUntil(for: reason) else { return }
+        rearmTasks[reason]?.cancel()
+        let delay = max(0, until.timeIntervalSinceNow)
+        rearmTasks[reason] = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, let self else { return }
+            await self.retryAfterRearm(reason: reason, signature: signature)
+        }
+    }
+
+    private func retryAfterRearm(reason: RecoveryReason, signature: String) {
+        rearmTasks[reason] = nil
+        // Only retry if this router generation is still the one that paused, and it is
+        // actually still offline (router got torn down on pause).
+        guard routerTapSig == nil || routerTapSig == signature, let config = routerConfig else { return }
+        bamLog("router recovery re-arm fired: \(reason.rawValue)")
+        _ = startRouter(config: config)
     }
 
     // MARK: router recovery events
@@ -674,6 +696,8 @@ public actor CoreAudioEngine: AudioEngineProtocol {
     }
 
     public func resetRouterRecovery() {
+        for t in rearmTasks.values { t.cancel() }
+        rearmTasks.removeAll()
         routerRecoveryPolicy.reset()
         emitRouterRecoveryEvent(.recovered)
     }
@@ -773,6 +797,8 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         routerHealthTask = nil
         routerSamplerTask?.cancel()
         routerSamplerTask = nil
+        for t in rearmTasks.values { t.cancel() }
+        rearmTasks.removeAll()
         router = nil          // deinit tears down the aggregate → un-mutes apps
         routerConfig = nil
         routerTapSig = nil
