@@ -306,9 +306,9 @@ final class RouterRecoveryTests: XCTestCase {
         XCTAssertEqual(calls, [
             .startRouter,
             .setOutputVolume(uid: "OtherOutput", volume: 0),
+            .setOutputVolume(uid: "OtherOutput", volume: 0.42),
             .setOutputVolume(uid: "MockOutput", volume: 0.42),
             .setOutputMuted(uid: "MockOutput", muted: false),
-            .setOutputVolume(uid: "OtherOutput", volume: 0.42),
             .setOutputMuted(uid: "OtherOutput", muted: true),
             .startRouter,
             .setOutputMuted(uid: "OtherOutput", muted: true),
