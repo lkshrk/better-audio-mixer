@@ -19,6 +19,11 @@
       "MinimumVersion": "12"
     }
   ],
+  "ApplicationsToMonitor": {
+    "mac": [
+      "me.harke.bam"
+    ]
+  },
   "Actions": [
     {
       "UUID": "me.harke.better-audio-mixer.streamdeck.device",
