@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   plugin:
-    runs-on: macos-15
+    runs-on: macos-26
     env:
       SIGNING_IDENTITY: ${{ secrets.SIGNING_IDENTITY }}
       DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}

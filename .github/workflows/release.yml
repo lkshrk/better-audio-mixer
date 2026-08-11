@@ -67,7 +67,7 @@ jobs:
   release:
     needs: gate
     if: needs.gate.outputs.tag != ''
-    runs-on: macos-15
+    runs-on: macos-26
     env:
       DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
       SIGNING_IDENTITY: ${{ secrets.SIGNING_IDENTITY }}
