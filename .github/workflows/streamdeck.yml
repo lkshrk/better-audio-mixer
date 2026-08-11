@@ -26,7 +26,7 @@ jobs:
       TAG: ${{ inputs.release_tag }}
       PLUGIN_DIR: StreamDeck/me.harke.better-audio-mixer.sdPlugin
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.release_tag }}
 

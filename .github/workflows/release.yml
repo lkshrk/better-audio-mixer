@@ -42,7 +42,7 @@ jobs:
           fi
           echo "Found successful CI run for ${TARGET_SHA}."
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
@@ -74,7 +74,7 @@ jobs:
       TAG: ${{ needs.gate.outputs.tag }}
       PLUGIN_DIR: StreamDeck/me.harke.better-audio-mixer.sdPlugin
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.gate.outputs.tag }}
           fetch-depth: 0
