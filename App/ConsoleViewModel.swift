@@ -60,6 +60,7 @@ final class ConsoleViewModel {
     var controlServer: ControlServer?
     private var controlPushTask: Task<Void, Never>?
     private var routerMutationTask: Task<Void, Never>?
+    var routerWorkGeneration = 0
 
     /// The catch-all device. Its source is the `.rest` remainder; it routes every
     /// app not claimed by another device to the system default hardware output.
@@ -121,18 +122,8 @@ final class ConsoleViewModel {
         }
         if activeMixID == nil { activeMixID = config.mixes.first?.id }
         await captureStockVolume()
-        // Creating the aggregate + taps triggers the same momentary 100% device-volume
-        // reset as teardown does. Mute across setup, restore stock, then unmute — this
-        // also clears any mute a previous interrupted exit may have stranded.
-        let setupUID = driverEnabled ? systemOutputUID : nil
-        if let setupUID { CoreAudioEngine.setDeviceMuted(uid: setupUID, true) }
+        // startRouterGuarded owns setup protection and restores only a safe route.
         await subscribe()
-        if let setupUID {
-            let stock = defaults.object(forKey: Self.stockVolumeKey) != nil
-                ? defaults.double(forKey: Self.stockVolumeKey) : nil
-            if let stock { CoreAudioEngine.setDeviceVolume(uid: setupUID, Float(stock)) }
-            CoreAudioEngine.setDeviceMuted(uid: setupUID, false)
-        }
         startControlServer()
         await restoreOutputVolume()
     }
@@ -189,14 +180,18 @@ final class ConsoleViewModel {
             await startRouterSubscriptions(reason: "reload starting router")
         } else {
             stopRouterSubscriptions(reason: "reload stopping router")
-            await engine.stopRouter()
+            await drainRouterWork()
+            guard await stopRouterGuarded() else {
+                applyRouterStatus(RouterStatus(cause: .buildFailed))
+                return
+            }
             enterSilentRouterState(reason: nil)
         }
     }
 
     private func startRouterSubscriptions(reason: StaticString) async {
         AppLog.router.debug("\(reason, privacy: .public)")
-        await startRouterReconciling()
+        await enqueueRouterWork { model in await model.startRouterReconciling() }.value
         subscribeRouterEvents()
         subscribeRouterRecoveryEvents()
         let stream = await engine.routerSnapshots()
@@ -301,9 +296,11 @@ final class ConsoleViewModel {
                 try? await Task.sleep(for: .seconds(Double(delay)))
                 guard let self, self.driverEnabled, !Task.isCancelled else { return }
                 AppLog.router.debug("router recovery heartbeat cause=\(cause.rawValue, privacy: .public) delay=\(delay, privacy: .public)s")
-                let next = await self.startRouterGuarded(config: self.config)
-                self.applyRouterStatus(next)
-                if next.cause != cause { return }   // online or moved to another cause that schedules its own path
+                await self.enqueueRouterWork { model in
+                    guard !Task.isCancelled else { return }
+                    await model.startRouterReconciling()
+                }.value
+                if self.routerStatus.cause != cause { return }
                 delay = min(delay * 2, 30)
             }
         }
@@ -324,12 +321,17 @@ final class ConsoleViewModel {
                 // Reflect device add/remove in the picker immediately instead of
                 // waiting on the 2s poll.
                 self.outputDevices = await self.engine.outputDevices()
-                // Always re-run: the engine's aggregate-signature check makes this a
-                // cheap no-op when the output and tap set are unchanged, but a HEALTHY
-                // router must still rebuild when its bound output device re-enumerated
-                // or the default-output target moved (the old gate skipped that case
-                // and left the aggregate bound to a dead device → silent speaker).
-                await self.startRouterReconciling()
+                // Await the queued pass so the newest-only stream bounds pending
+                // invalidations instead of turning each one into another Task.
+                await self.enqueueRouterWork { model in
+                    let checkedConfig = model.config
+                    let unchanged = await model.engine.canKeepCurrentRouter(config: checkedConfig)
+                    guard !Task.isCancelled else { return }
+                    let relevantOutputs = await model.engine.routerOutputUIDs(config: checkedConfig)
+                    if unchanged, model.config == checkedConfig,
+                       relevantOutputs.isDisjoint(with: model.guardedOutputs.keys) { return }
+                    await model.startRouterReconciling()
+                }.value
             }
         }
     }
@@ -381,9 +383,11 @@ final class ConsoleViewModel {
 
     func restartAudio() async {
         AppLog.router.notice("manual restart requested")
-        await engine.resetRouterRecovery()
-        audioRecoveryDisplayState = .ok
-        await startRouterReconciling()
+        await enqueueRouterWork { model in
+            await model.engine.resetRouterRecovery()
+            model.audioRecoveryDisplayState = .ok
+            await model.startRouterReconciling()
+        }.value
     }
 
     func stop() async {
@@ -391,9 +395,9 @@ final class ConsoleViewModel {
         controlPushTask?.cancel(); controlPushTask = nil
         controlServer?.stop(); controlServer = nil
         stopRouterSubscriptions()
-        routerMutationTask?.cancel(); routerMutationTask = nil
+        await drainRouterWork()
         appsTask?.cancel(); appsTask = nil
-        await engine.stopRouter()
+        _ = await stopRouterGuarded()
     }
 
     // MARK: master (the routed hardware device's own OS volume)
@@ -423,6 +427,13 @@ final class ConsoleViewModel {
     /// the capture-permission grant. The periodic poll must not surface that
     /// transient dim on the fader — the fader should keep showing the user's level.
     var restoringVolume = false
+
+    struct GuardedOutput {
+        var volume: Float
+        var muted: Bool
+    }
+    // Keep user intent across failed rebuilds; HAL may reset the hardware to 100%.
+    var guardedOutputs: [String: GuardedOutput] = [:]
 
     /// True once this session has actually taken authority over the device volume —
     /// i.e. `restoreOutputVolume()` ran to completion (applied the saved bam level,
@@ -463,13 +474,30 @@ final class ConsoleViewModel {
         }
     }
 
-    func enqueueRouterWork(_ work: @escaping @MainActor (ConsoleViewModel) async -> Void) {
+    @discardableResult
+    func enqueueRouterWork(_ work: @escaping @MainActor (ConsoleViewModel) async -> Void) -> Task<Void, Never> {
         let previous = routerMutationTask
+        let generation = routerWorkGeneration
         routerMutationTask = Task { [weak self] in
             await previous?.value
-            guard let self, self.driverEnabled, !Task.isCancelled else { return }
+            guard let self, self.driverEnabled, !Task.isCancelled,
+                  self.routerWorkGeneration == generation else { return }
             await work(self)
         }
+        return routerMutationTask!
+    }
+
+    private func drainRouterWork() async {
+        routerWorkGeneration += 1
+        let pending = routerMutationTask
+        pending?.cancel()
+        await pending?.value
+        routerMutationTask = nil
+    }
+
+    func pendingRouterWorkForExit() -> Task<Void, Never>? {
+        routerMutationTask?.cancel()
+        return routerMutationTask
     }
 
     func persist(_ cfg: BamConfig) {

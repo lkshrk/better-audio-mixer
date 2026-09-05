@@ -43,7 +43,7 @@ final class ActionRouter {
     }
 
     private struct MixInfo { var name: String; var emoji: String; var pct: Int; var muted: Bool }
-    private struct StereoLevel { var mono: Float; var left: Float; var right: Float }
+    struct StereoLevel: Equatable { var mono: Float; var left: Float; var right: Float }
     struct StereoPeak: Equatable { var left: Float; var right: Float }
 
     struct RollingPeakWindow {
@@ -90,8 +90,8 @@ final class ActionRouter {
 
     private var contexts: [String: Binding] = [:]
     private var mixes: [String: MixInfo] = [:]
-    private var levels: [String: StereoLevel] = [:]
-    private var peakWindows: [String: RollingPeakWindow] = [:]
+    private(set) var levels: [String: StereoLevel] = [:]
+    private(set) var peakWindows: [String: RollingPeakWindow] = [:]
     private var masterPct = 0
     private var masterMuted = false
     private var masterLevel = StereoLevel(mono: meterFloorDB, left: meterFloorDB, right: meterFloorDB)
@@ -482,7 +482,8 @@ final class ActionRouter {
     private func ingestMeter(_ obj: [String: Any]) {
         let now = Date().timeIntervalSinceReferenceDate
         for m in obj["mixes"] as? [[String: Any]] ?? [] {
-            if let id = m["id"] as? String, let lvl = m["level"] as? Double {
+            // State owns membership; delayed meters must not resurrect deleted mixes.
+            if let id = m["id"] as? String, mixes[id] != nil, let lvl = m["level"] as? Double {
                 let left = (m["levelLeft"] as? Double).map(Float.init)
                 let right = (m["levelRight"] as? Double).map(Float.init)
                 let stereo = smoothStereo(levels[id], mono: Float(lvl), left: left, right: right)
@@ -530,6 +531,8 @@ final class ActionRouter {
                                 pct: m["pct"] as? Int ?? 0,
                                 muted: m["muted"] as? Bool ?? false)
         }
+        levels = levels.filter { mixes[$0.key] != nil }
+        peakWindows = peakWindows.filter { mixes[$0.key] != nil }
         if let master = obj["master"] as? [String: Any] {
             masterPct = master["pct"] as? Int ?? 0
             masterMuted = master["muted"] as? Bool ?? false

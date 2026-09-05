@@ -35,6 +35,43 @@ struct ActionRouterMessageTests {
     private let masterAction = "me.harke.better-audio-mixer.streamdeck.master"
     private let outputAction = "me.harke.better-audio-mixer.streamdeck.output"
 
+    @Test(arguments: [false, true]) func removedMixMetersCannotSurviveOrReturn(explicitRemoval: Bool) {
+        let router = ActionRouter(elgato: RecordingElgato())
+        router.ingestBAMFrame(stateFrame())
+        router.ingestBAMFrame(meterFrame(level: -5))
+        #expect(router.levels["m-game"] != nil)
+        #expect(router.peakWindows["m-game"] != nil)
+        if explicitRemoval {
+            router.ingestBAMFrame(["t": "removed", "mix": "m-game"])
+        } else {
+            router.ingestBAMFrame(["t": "state", "mixes": [[String: Any]]()])
+        }
+        #expect(router.levels.isEmpty)
+        #expect(router.peakWindows.isEmpty)
+        router.ingestBAMFrame(meterFrame(level: -1))
+        #expect(router.levels.isEmpty)
+        #expect(router.peakWindows.isEmpty)
+        router.ingestBAMFrame(stateFrame())
+        #expect(router.levels.isEmpty)
+        #expect(router.peakWindows.isEmpty)
+        router.ingestBAMFrame(meterFrame(level: -30))
+        #expect(router.levels["m-game"]?.mono == -60 + 30 * 0.82)
+        #expect(router.peakWindows["m-game"]?.peak.left == -60 + 30 * 0.82)
+    }
+
+    @Test func replacementStatePreservesSurvivingMeterAndPeakHistory() {
+        let router = ActionRouter(elgato: RecordingElgato())
+        router.ingestBAMFrame(stateFrame())
+        router.ingestBAMFrame(meterFrame(level: -5))
+        let level = router.levels["m-game"]
+        let peak = router.peakWindows["m-game"]?.peak
+        router.ingestBAMFrame(stateFrame())
+        #expect(router.levels["m-game"] == level)
+        #expect(router.peakWindows["m-game"]?.peak == peak)
+        router.ingestBAMFrame(meterFrame(level: -30))
+        #expect(router.peakWindows["m-game"]?.peak == peak)
+    }
+
     @Test func keypadMeterFramesPushLiveSVGsWithoutRepeatingKeyState() {
         let elgato = RecordingElgato()
         let router = ActionRouter(elgato: elgato)

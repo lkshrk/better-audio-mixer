@@ -8,6 +8,8 @@ public actor MockAudioEngine: AudioEngineProtocol {
     }
 
     public private(set) var calls: [Call] = []
+    public private(set) var acknowledgedOutputRestores: [Set<String>] = []
+    public func acknowledgeOutputRestore(uids: Set<String>) async { acknowledgedOutputRestores.append(uids) }
 
     public func resetCalls() {
         calls = []
@@ -29,21 +31,49 @@ public actor MockAudioEngine: AudioEngineProtocol {
 
     public func defaultOutputUID() -> String? { "MockOutput" }
 
-    public func boundOutputUID() -> String? { "MockOutput" }
+    public func boundOutputUID() -> String? {
+        routerConfig?.mixes.compactMap { if case .hardware(let uid) = $0.dest { uid } else { nil } }.first ?? "MockOutput"
+    }
+    public func routerOutputUIDs(config: BamConfig) async -> Set<String> {
+        let uids = Set(config.mixes.compactMap { if case .hardware(let uid) = $0.dest { uid } else { nil } })
+        return uids.isEmpty ? ["MockOutput"] : uids
+    }
 
-    private var mockVolume: Float = 0.8
-    public func outputVolume(uid: String) -> Float? { mockVolume }
+    private var mockVolumes: [String: Float] = [:]
+    public func outputVolume(uid: String) -> Float? { mockVolumes[uid] ?? 0.8 }
     public func setOutputVolume(uid: String, _ volume: Float) {
         let clamped = max(0, min(1, volume))
         calls.append(.setOutputVolume(uid: uid, volume: clamped))
-        mockVolume = clamped
+        mockVolumes[uid] = clamped
     }
 
-    private var mockMuted = false
-    public func outputMuted(uid: String) -> Bool { mockMuted }
+    private var mockMutes: [String: Bool] = [:]
+    public func outputMuted(uid: String) -> Bool { mockMutes[uid] ?? false }
     public func setOutputMuted(uid: String, _ muted: Bool) {
         calls.append(.setOutputMuted(uid: uid, muted: muted))
-        mockMuted = muted
+        mockMutes[uid] = muted
+    }
+
+    private var checkedMuteResult: OutputWriteResult = .applied
+    private var checkedVolumeResult: OutputWriteResult = .applied
+    private var keepCurrentRouter = false
+    public func setCheckedWriteResults(mute: OutputWriteResult = .applied, volume: OutputWriteResult = .applied) {
+        checkedMuteResult = mute
+        checkedVolumeResult = volume
+    }
+    public func setCanKeepCurrentRouter(_ keep: Bool) { keepCurrentRouter = keep }
+    public private(set) var canKeepCurrentRouterCalls = 0
+    public func canKeepCurrentRouter(config: BamConfig) async -> Bool {
+        canKeepCurrentRouterCalls += 1
+        return keepCurrentRouter && routerConfig == config
+    }
+    public func setOutputMutedChecked(uid: String, _ muted: Bool) async -> OutputWriteResult {
+        if checkedMuteResult == .applied { setOutputMuted(uid: uid, muted) }
+        return checkedMuteResult
+    }
+    public func setOutputVolumeChecked(uid: String, _ volume: Float) async -> OutputWriteResult {
+        if checkedVolumeResult == .applied { setOutputVolume(uid: uid, volume) }
+        return checkedVolumeResult
     }
 
     public func runningAudioApps() -> [AudioApp] {
@@ -94,7 +124,7 @@ public actor MockAudioEngine: AudioEngineProtocol {
 
     private var routerEventSink: AsyncStream<Void>.Continuation?
     public func routerEvents() -> AsyncStream<Void> {
-        AsyncStream { continuation in
+        AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
             routerEventSink = continuation
         }
     }
@@ -132,6 +162,7 @@ public actor MockAudioEngine: AudioEngineProtocol {
         routerTask = nil
         routerConfig = nil
     }
+    public func stopRouterChecked() async -> Bool { stopRouter(); return true }
 
     public func routerSnapshots() -> AsyncStream<RouterSnapshot> {
         AsyncStream { continuation in

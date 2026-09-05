@@ -14,13 +14,15 @@ final class GuardedOutputRebuildTests: XCTestCase {
 
         await CoreAudioEngine.setDeviceOpsForTests((
             volume: { _ in 0.7 },
-            setVolume: { _, _ in },
-            setMuted: { uid, muted in calls.record(uid: uid, muted: muted, rebuildFiredBeforeThis: rebuildFlag.value) }
+            muted: { _ in false },
+            setVolume: { _, _ in .applied },
+            setMuted: { uid, muted in calls.record(uid: uid, muted: muted, rebuildFiredBeforeThis: rebuildFlag.value); return .applied }
         ))
 
         let engine = CoreAudioEngine()
         await engine.performGuardedOutputRebuildForTests(uids: ["dev-A", "dev-B"], unmute: true) {
             rebuildFlag.set(true)
+            return true
         }
 
         let recorded = calls.all()
@@ -38,12 +40,13 @@ final class GuardedOutputRebuildTests: XCTestCase {
 
         await CoreAudioEngine.setDeviceOpsForTests((
             volume: { _ in 0.5 },
-            setVolume: { _, _ in },
-            setMuted: { uid, muted in calls.record(uid: uid, muted: muted, rebuildFiredBeforeThis: false) }
+            muted: { _ in false },
+            setVolume: { _, _ in .applied },
+            setMuted: { uid, muted in calls.record(uid: uid, muted: muted, rebuildFiredBeforeThis: false); return .applied }
         ))
 
         let engine = CoreAudioEngine()
-        await engine.performGuardedOutputRebuildForTests(uids: ["dev-A"], unmute: false) {}
+        await engine.performGuardedOutputRebuildForTests(uids: ["dev-A"], unmute: false) { true }
 
         let recorded = calls.all()
         XCTAssertTrue(recorded.allSatisfy { $0.muted }, "when unmute=false, only mute calls should occur (no unmute)")
@@ -54,8 +57,9 @@ final class GuardedOutputRebuildTests: XCTestCase {
 
         await CoreAudioEngine.setDeviceOpsForTests((
             volume: { _ in 0.7 },
-            setVolume: { _, _ in },
-            setMuted: { uid, muted in calls.record(uid: uid, muted: muted, rebuildFiredBeforeThis: false) }
+            muted: { _ in false },
+            setVolume: { _, _ in .applied },
+            setMuted: { uid, muted in calls.record(uid: uid, muted: muted, rebuildFiredBeforeThis: false); return .applied }
         ))
         await CoreAudioEngine.setChangeListenerFactoryForTests { _, _, _ in NoOpToken() }
 

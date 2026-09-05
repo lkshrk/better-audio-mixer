@@ -1,5 +1,9 @@
 import Foundation
 
+public enum OutputWriteResult: Sendable, Equatable {
+    case applied, unsupported, failed
+}
+
 public protocol AudioEngineProtocol: Sendable {
     func runningAudioApps() async -> [AudioApp]
     /// Bundle IDs of processes currently producing output audio (live playback).
@@ -20,6 +24,15 @@ public protocol AudioEngineProtocol: Sendable {
     func outputMuted(uid: String) async -> Bool
     /// Mute/unmute the given output device at the OS level (preserves volume).
     func setOutputMuted(uid: String, _ muted: Bool) async
+    func setOutputMutedChecked(uid: String, _ muted: Bool) async -> OutputWriteResult
+    func setOutputVolumeChecked(uid: String, _ volume: Float) async -> OutputWriteResult
+    /// True authorizes doing nothing only; never an unguarded subsequent rebuild.
+    func canKeepCurrentRouter(config: BamConfig) async -> Bool
+    func routerOutputUIDs(config: BamConfig) async -> Set<String>
+    /// Called only after the caller finishes a safe route and all checked output restoration.
+    func acknowledgeOutputRestore(uids: Set<String>) async
+    /// The serialized caller owns output protection until it releases this suspension.
+    func setRouterRecoverySuspended(_ suspended: Bool) async
     func stop() async
 
     /// Build/rebuild the router from a v3 config (taps + mixes + destinations).
@@ -29,6 +42,7 @@ public protocol AudioEngineProtocol: Sendable {
     /// rebuilding taps or reopening devices.
     func updateRouterGains(config: BamConfig) async
     func stopRouter() async
+    func stopRouterChecked() async -> Bool
     /// Live per-source + per-mix levels while the router runs.
     func routerSnapshots() async -> AsyncStream<RouterSnapshot>
     /// Fires whenever the audio process list or output-device list changes —
@@ -39,4 +53,16 @@ public protocol AudioEngineProtocol: Sendable {
     func routerRecoveryEvents() async -> AsyncStream<RouterRecoveryEvent>
     /// Clears any automatic recovery pause before a user-requested rebuild.
     func resetRouterRecovery() async
+}
+
+public extension AudioEngineProtocol {
+    func setRouterRecoverySuspended(_ suspended: Bool) async {}
+    func stopRouterChecked() async -> Bool { false }
+    func acknowledgeOutputRestore(uids: Set<String>) async {}
+    func setOutputMutedChecked(uid: String, _ muted: Bool) async -> OutputWriteResult { .unsupported }
+    func setOutputVolumeChecked(uid: String, _ volume: Float) async -> OutputWriteResult { .unsupported }
+    func canKeepCurrentRouter(config: BamConfig) async -> Bool { false }
+    func routerOutputUIDs(config: BamConfig) async -> Set<String> {
+        Set(config.mixes.compactMap { if case .hardware(let uid) = $0.dest { uid } else { nil } })
+    }
 }

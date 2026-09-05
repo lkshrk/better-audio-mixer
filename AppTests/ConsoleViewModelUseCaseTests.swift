@@ -175,6 +175,20 @@ final class ConsoleViewModelUseCaseTests: XCTestCase {
         await model.stop()
     }
 
+    func testStopInvalidatesStartupRestoreWaitingForCapture() async {
+        let mock = MockAudioEngine(silentRouter: true)
+        let model = makeModel(engine: mock, driver: true, saved: 0.6)
+        await model.startMock(config: BamConfig())
+        let restore = Task { await model.restoreOutputVolume() }
+        try? await Task.sleep(for: .milliseconds(100))
+        await model.stop()
+        await mock.resetCalls()
+        await restore.value
+        let calls = await mock.calls
+        XCTAssertTrue(calls.isEmpty, "stale startup task must not write after teardown")
+        XCTAssertFalse(model.bamVolumeApplied)
+    }
+
     func testStaleRouterStartCannotOverwriteNewerGainConfig() async {
         let mock = MockAudioEngine()
         await mock.setStartRouterDelay(.milliseconds(200))

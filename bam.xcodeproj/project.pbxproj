@@ -15,6 +15,7 @@
 		68E75D40B3995E1827DDF1A2 /* Log.swift in Sources */ = {isa = PBXBuildFile; fileRef = D775C14357F80E055B095736 /* Log.swift */; };
 		7B61C45064A107B28B4A6CB7 /* ConsoleViewModel+Volume.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6E8A251E92BA04BC821A812 /* ConsoleViewModel+Volume.swift */; };
 		8C48A55690421E4B23FE3EC5 /* ChannelStrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56565B7281A1EBD3533F2E5B /* ChannelStrip.swift */; };
+		9EC89CCDE55A5DE2E4ECF343 /* RouterSafetyConcurrencyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25759BF0446B8721EC73F01D /* RouterSafetyConcurrencyTests.swift */; };
 		A85A072B5C728656F7D30061 /* ConsoleDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9AD661A8BD0635A24BC6074 /* ConsoleDiagnostics.swift */; };
 		AF1ACB6FF224BC0D3F328D1E /* AudioRecoveryDisplayState.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD27CF0F8C598478D6CFFC1F /* AudioRecoveryDisplayState.swift */; };
 		B8EB51CB3A3569BD4BE2C3DD /* BamApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B310ECE845F2AF06ECF89C86 /* BamApp.swift */; };
@@ -41,6 +42,7 @@
 /* Begin PBXFileReference section */
 		0425A295A3528927CF29587D /* bam.yaml */ = {isa = PBXFileReference; lastKnownFileType = text.yaml; path = bam.yaml; sourceTree = "<group>"; };
 		19EAE6316D97A824FA6AB00C /* bamTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = bamTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		25759BF0446B8721EC73F01D /* RouterSafetyConcurrencyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouterSafetyConcurrencyTests.swift; sourceTree = "<group>"; };
 		29090E0D63EACFDF77E1A7CD /* MeterBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeterBar.swift; sourceTree = "<group>"; };
 		3682354B40DAFEB00830820E /* ConsoleViewModel+MixerControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ConsoleViewModel+MixerControl.swift"; sourceTree = "<group>"; };
 		4DD2D055563B514321429B1D /* ConsoleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConsoleView.swift; sourceTree = "<group>"; };
@@ -90,6 +92,7 @@
 			children = (
 				F10AB49B15328BE7A0FDFF21 /* ConsoleViewModelUseCaseTests.swift */,
 				F6CF52141C9E399BB8CAADB5 /* RouterRecoveryTests.swift */,
+				25759BF0446B8721EC73F01D /* RouterSafetyConcurrencyTests.swift */,
 			);
 			path = AppTests;
 			sourceTree = "<group>";
@@ -253,6 +256,7 @@
 			files = (
 				E76E0E6166086845C988A34D /* ConsoleViewModelUseCaseTests.swift in Sources */,
 				5ACCD643C76B8FFDDD6CE8FF /* RouterRecoveryTests.swift in Sources */,
+				9EC89CCDE55A5DE2E4ECF343 /* RouterSafetyConcurrencyTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -9,7 +9,7 @@ import Foundation
 final class UDSClient {
     private var fd: Int32 = -1
     private var readSource: DispatchSourceRead?
-    private var readBuffer = Data()
+    private(set) var readBuffer = Data()
     private var connected = false
     private var retryCount = 0
     private var launchAttempted = false
@@ -78,11 +78,16 @@ final class UDSClient {
         var buf = [UInt8](repeating: 0, count: 4096)
         let n = Darwin.recv(fd, &buf, buf.count, 0)
         if n <= 0 { handleDisconnect(); return }
-        readBuffer.append(contentsOf: buf.prefix(n))
+        consume(Data(buf.prefix(n)))
+    }
+
+    /// Consume received bytes without requiring a live socket.
+    func consume(_ bytes: Data) {
+        readBuffer.append(bytes)
 
         while let idx = readBuffer.firstIndex(of: 0x0A) {
             let lineData = Data(readBuffer[readBuffer.startIndex ..< idx])
-            readBuffer = readBuffer[readBuffer.index(after: idx)...]
+            readBuffer.removeSubrange(readBuffer.startIndex...idx)
             if lineData.isEmpty { continue }
             guard let obj = try? decodeFrame(lineData) else { continue }
             Log.info("UDS frame: \(obj["t"] as? String ?? "?")")

@@ -10,6 +10,37 @@ import BamCore
 /// while system audio is playing — confirms real app audio reaches a BAM
 /// virtual device through the full router. Quality is verified by ear.
 final class RouterSmokeTests: XCTestCase {
+    private enum ProtectionError: Error { case unavailable, routingFailed }
+
+    private func startProtected(_ engine: CoreAudioEngine, config: BamConfig) async throws {
+        let uids = await engine.routerOutputUIDs(config: config)
+        guard !uids.isEmpty else { throw ProtectionError.unavailable }
+        var saved: [String: (Float, Bool)] = [:]
+        for uid in uids {
+            guard let volume = await engine.outputVolume(uid: uid) else { throw ProtectionError.unavailable }
+            saved[uid] = (volume, await engine.outputMuted(uid: uid))
+        }
+        let intended = saved
+        addTeardownBlock {
+            guard await engine.stopRouterChecked() else { throw ProtectionError.unavailable }
+            try await Self.restore(engine, intended)
+        }
+        for uid in uids {
+            guard await engine.setOutputMutedChecked(uid: uid, true) == .applied else { throw ProtectionError.unavailable }
+        }
+        guard !(await engine.startRouter(config: config)).isFailure else { throw ProtectionError.routingFailed }
+        try await Self.restore(engine, intended)
+    }
+
+    private static func restore(_ engine: CoreAudioEngine, _ intended: [String: (Float, Bool)]) async throws {
+        for (uid, state) in intended {
+            guard await engine.setOutputVolumeChecked(uid: uid, state.0) == .applied else { throw ProtectionError.unavailable }
+        }
+        for (uid, state) in intended {
+            guard await engine.setOutputMutedChecked(uid: uid, state.1) == .applied else { throw ProtectionError.unavailable }
+        }
+        await engine.acknowledgeOutputRestore(uids: Set(intended.keys))
+    }
     private let bundleID = "me.harke.bam.driver"
     private let sr = 48_000.0
 
@@ -122,9 +153,7 @@ final class RouterSmokeTests: XCTestCase {
             pans: ["all": 0.5]
         )
         let engine = CoreAudioEngine()
-        let failed = await engine.startRouter(config: config).failedMixIDs
-        XCTAssertTrue(failed.isEmpty, "router failed mixes: \(failed)")
-        defer { Task { await engine.stopRouter() } }
+        try await startProtected(engine, config: config)
 
         let cap = Capture()
         guard let u = makeCapture(deviceID: dev, cap: cap) else { return XCTFail("capture failed") }
@@ -158,9 +187,7 @@ final class RouterSmokeTests: XCTestCase {
             pans: ["all": 0.5]
         )
         let engine = CoreAudioEngine()
-        let failed = await engine.startRouter(config: config).failedMixIDs
-        XCTAssertTrue(failed.isEmpty, "Monitor mix failed to open hardware \(outUID): \(failed)")
-        defer { Task { await engine.stopRouter() } }
+        try await startProtected(engine, config: config)
 
         print("MonitorSmoke: routing remainder → \(outUID). Music should stay full-fidelity for 10s.")
         try await Task.sleep(for: .seconds(10)) // listen now

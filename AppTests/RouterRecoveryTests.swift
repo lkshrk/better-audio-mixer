@@ -298,22 +298,111 @@ final class RouterRecoveryTests: XCTestCase {
         model.applyTopology { $0.master = 0.9 }
 
         let transitionComplete = await eventuallyAsync(1.0) {
-            await mock.calls.count >= 9
+            await mock.startRouterCalls == 3
         }
         XCTAssertTrue(transitionComplete)
 
         let calls = await mock.calls
-        XCTAssertEqual(calls, [
-            .startRouter,
-            .setOutputVolume(uid: "OtherOutput", volume: 0),
-            .setOutputVolume(uid: "OtherOutput", volume: 0.42),
-            .setOutputVolume(uid: "MockOutput", volume: 0.42),
-            .setOutputMuted(uid: "MockOutput", muted: false),
-            .setOutputMuted(uid: "OtherOutput", muted: true),
-            .startRouter,
-            .setOutputMuted(uid: "OtherOutput", muted: true),
-            .setOutputVolume(uid: "OtherOutput", volume: 0.42),
-        ])
+        let starts = calls.indices.filter { calls[$0] == .startRouter }
+        XCTAssertEqual(starts.count, 2)
+        XCTAssertTrue(calls.prefix(starts.first ?? 0).contains(.setOutputMuted(uid: "OtherOutput", muted: true)))
+        XCTAssertFalse(calls.contains(.setOutputMuted(uid: "OtherOutput", muted: false)),
+                       "master-muted output must stay muted throughout the switch")
+        XCTAssertTrue(calls.contains(.setOutputVolume(uid: "OtherOutput", volume: 0.42)))
         await model.stop()
+    }
+
+    func testFailedRestartKeepsHardwareMutedAndRetainsIntendedVolume() async {
+        let mock = MockAudioEngine()
+        let model = ConsoleViewModel(engine: mock, defaults: defaults)
+        await model.startMock(config: config())
+        await mock.setOutputVolume(uid: "MockOutput", 0.42)
+        model.outputVolume = 0.42
+        await mock.scriptRouterStatuses([RouterStatus(cause: .buildFailed), .ok])
+        await mock.resetCalls()
+
+        await model.restartAudio()
+
+        let failedCalls = await mock.calls
+        XCTAssertFalse(failedCalls.contains(.setOutputMuted(uid: "MockOutput", muted: false)),
+                       "failed routing must not expose unattenuated playback")
+        let stillMuted = await mock.outputMuted(uid: "MockOutput")
+        XCTAssertTrue(stillMuted)
+
+        // A HAL reset during a failed rebuild must not replace the user's target.
+        await mock.setOutputVolume(uid: "MockOutput", 1)
+        await mock.resetCalls()
+        await model.restartAudio()
+
+        let restored = await mock.outputVolume(uid: "MockOutput")
+        XCTAssertEqual(restored, 0.42)
+        await model.stop()
+    }
+
+    func testUnchangedProcessEventDoesNotTouchHardware() async {
+        let mock = MockAudioEngine()
+        let model = ConsoleViewModel(engine: mock, defaults: defaults)
+        await model.startMock(config: config())
+        await mock.setCanKeepCurrentRouter(true)
+        await mock.resetCalls()
+        let checksBefore = await mock.canKeepCurrentRouterCalls
+        await mock.emitRouterEvent()
+        let checked = await eventuallyAsync { await mock.canKeepCurrentRouterCalls > checksBefore }
+        XCTAssertTrue(checked)
+        await model.enqueueRouterWork { _ in }.value
+        let calls = await mock.calls
+        XCTAssertTrue(calls.isEmpty, "healthy event no-op must not enter the hardware mute guard")
+        await model.stop()
+    }
+
+    func testFailedMuteAbortsBeforeRouterMutation() async {
+        let mock = MockAudioEngine()
+        let model = ConsoleViewModel(engine: mock, defaults: defaults)
+        await model.startMock(config: config())
+        await mock.setCheckedWriteResults(mute: .failed)
+        await mock.resetCalls()
+        await model.restartAudio()
+        let calls = await mock.calls
+        XCTAssertFalse(calls.contains(.startRouter))
+        XCTAssertEqual(model.routerStatus.cause, .buildFailed)
+        await model.stop()
+    }
+
+    func testFailedVolumeRestoreDoesNotUnmute() async {
+        let mock = MockAudioEngine()
+        let model = ConsoleViewModel(engine: mock, defaults: defaults)
+        await model.startMock(config: config())
+        await mock.setCheckedWriteResults(volume: .failed)
+        await mock.resetCalls()
+        await model.restartAudio()
+        let calls = await mock.calls
+        XCTAssertTrue(calls.contains(.startRouter))
+        XCTAssertFalse(calls.contains(.setOutputMuted(uid: "MockOutput", muted: false)))
+        XCTAssertEqual(model.routerStatus.cause, .buildFailed)
+        await model.stop()
+    }
+
+    func testStopDrainsDelayedRouterWorkWithoutUnmutingAfterCancellation() async {
+        let mock = MockAudioEngine()
+        let model = ConsoleViewModel(engine: mock, defaults: defaults)
+        await model.startMock(config: config())
+        await mock.setStartRouterDelay(.milliseconds(150))
+        await mock.resetCalls()
+        model.applyTopology { $0.master = 0.9 }
+        model.applyTopology { $0.master = 0.8 }
+        let enteredGuard = await eventuallyAsync {
+            await mock.calls.contains(.setOutputMuted(uid: "MockOutput", muted: true))
+        }
+        XCTAssertTrue(enteredGuard)
+        await model.stop()
+        let calls = await mock.calls
+        XCTAssertEqual(calls.last, .setOutputMuted(uid: "MockOutput", muted: false),
+                       "checked stop may restore normal playback at the saved level")
+        let finalConfig = await mock.lastRouterConfig
+        XCTAssertNil(finalConfig)
+        await mock.resetCalls()
+        try? await Task.sleep(for: .milliseconds(200))
+        let laterCalls = await mock.calls
+        XCTAssertTrue(laterCalls.isEmpty, "cancelled queued work must not resume after teardown")
     }
 }
