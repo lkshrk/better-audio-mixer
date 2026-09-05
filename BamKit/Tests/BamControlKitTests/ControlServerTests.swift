@@ -237,6 +237,13 @@ final class ControlServerTests: XCTestCase {
     private var mock: MockMixerControl!
     private var testSockPath: String!
 
+    private func waitForCommand(_ condition: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(2)
+        while !condition(), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
     override func setUp() async throws {
         // Unique temp socket per test so parallel/sequential runs don't collide.
         testSockPath = NSTemporaryDirectory() + "bam-test-\(UUID().uuidString).sock"
@@ -369,8 +376,7 @@ final class ControlServerTests: XCTestCase {
         let (fd, _) = try await handshake()
         defer { Darwin.close(fd) }
         try writeLine(fd, ["t": "cmd", "op": "setPos", "mix": "m-game", "pos": 0.75])
-        // Give the MainActor hop time to land
-        try await Task.sleep(for: .milliseconds(100))
+        try await waitForCommand { mock.calls.contains(.setPos(mixID: "m-game", pos: 0.75)) }
         XCTAssertTrue(mock.calls.contains(.setPos(mixID: "m-game", pos: 0.75)),
                       "calls: \(mock.calls)")
     }
@@ -379,7 +385,7 @@ final class ControlServerTests: XCTestCase {
         let (fd, _) = try await handshake()
         defer { Darwin.close(fd) }
         try writeLine(fd, ["t": "cmd", "op": "nudgePos", "mix": "m-game", "delta": 0.05])
-        try await Task.sleep(for: .milliseconds(100))
+        try await waitForCommand { mock.calls.contains(.nudgePos(mixID: "m-game", delta: 0.05)) }
         XCTAssertTrue(mock.calls.contains(.nudgePos(mixID: "m-game", delta: 0.05)))
     }
 
@@ -387,7 +393,7 @@ final class ControlServerTests: XCTestCase {
         let (fd, _) = try await handshake()
         defer { Darwin.close(fd) }
         try writeLine(fd, ["t": "cmd", "op": "setMuted", "mix": "m-game", "muted": true])
-        try await Task.sleep(for: .milliseconds(100))
+        try await waitForCommand { mock.calls.contains(.setMuted(mixID: "m-game", muted: true)) }
         XCTAssertTrue(mock.calls.contains(.setMuted(mixID: "m-game", muted: true)))
     }
 
@@ -395,7 +401,7 @@ final class ControlServerTests: XCTestCase {
         let (fd, _) = try await handshake()
         defer { Darwin.close(fd) }
         try writeLine(fd, ["t": "cmd", "op": "toggleMuted", "mix": "m-game"])
-        try await Task.sleep(for: .milliseconds(100))
+        try await waitForCommand { mock.calls.contains(.toggleMuted(mixID: "m-game")) }
         XCTAssertTrue(mock.calls.contains(.toggleMuted(mixID: "m-game")))
     }
 
@@ -403,15 +409,15 @@ final class ControlServerTests: XCTestCase {
         let (fd, _) = try await handshake()
         defer { Darwin.close(fd) }
         try writeLine(fd, ["t": "cmd", "op": "setMasterPos", "pos": 0.3])
-        try await Task.sleep(for: .milliseconds(100))
-        XCTAssertTrue(mock.calls.contains(.setMasterPos(pos: 0.3)))
+        try await waitForCommand { mock.calls.contains(.setMasterPos(pos: 0.3)) }
+        XCTAssertTrue(mock.calls.contains(.setMasterPos(pos: 0.3)), "calls: \(mock.calls)")
     }
 
     func testCmdNudgeMasterPosMutatesMock() async throws {
         let (fd, _) = try await handshake()
         defer { Darwin.close(fd) }
         try writeLine(fd, ["t": "cmd", "op": "nudgeMasterPos", "delta": -0.03])
-        try await Task.sleep(for: .milliseconds(100))
+        try await waitForCommand { mock.calls.contains(.nudgeMasterPos(delta: -0.03)) }
         XCTAssertTrue(mock.calls.contains(.nudgeMasterPos(delta: -0.03)))
     }
 
@@ -419,7 +425,7 @@ final class ControlServerTests: XCTestCase {
         let (fd, _) = try await handshake()
         defer { Darwin.close(fd) }
         try writeLine(fd, ["t": "cmd", "op": "setMasterMuted", "muted": true])
-        try await Task.sleep(for: .milliseconds(100))
+        try await waitForCommand { mock.calls.contains(.setMasterMuted(muted: true)) }
         XCTAssertTrue(mock.calls.contains(.setMasterMuted(muted: true)))
     }
 
