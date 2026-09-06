@@ -1,10 +1,14 @@
 import Foundation
 
 public actor MockAudioEngine: AudioEngineProtocol {
+    private var diagnostics: AudioDiagnostics?
+    public func setAudioDiagnosticsForTests(_ value: AudioDiagnostics?) { diagnostics = value }
+    public func audioDiagnostics() async -> AudioDiagnostics? { diagnostics }
     public enum Call: Equatable, Sendable {
         case setOutputVolume(uid: String, volume: Float)
         case setOutputMuted(uid: String, muted: Bool)
         case startRouter
+        case updateRouterGains
     }
 
     public private(set) var calls: [Call] = []
@@ -40,18 +44,46 @@ public actor MockAudioEngine: AudioEngineProtocol {
     }
 
     private var mockVolumes: [String: Float] = [:]
-    public func outputVolume(uid: String) -> Float? { mockVolumes[uid] ?? 0.8 }
+    private var mockDeviceStates: [String: OutputDeviceState] = [:]
+    public func setOutputDeviceStateForTests(_ state: OutputDeviceState) { mockDeviceStates[state.uid] = state }
+    public func outputDeviceState(uid: String) async -> OutputDeviceState? {
+        mockDeviceStates[uid] ?? OutputDeviceState(uid: uid, deviceID: 1,
+                                                 volumes: [0: mockVolumes[uid] ?? 0.8],
+                                                 mutes: [0: mockMutes[uid] ?? false])
+    }
+    public func restoreOutputDeviceState(_ state: OutputDeviceState, restoreVolume: Bool, restoreMute: Bool) async -> OutputWriteResult {
+        guard var current = await outputDeviceState(uid: state.uid), current.deviceID == state.deviceID else { return .failed }
+        if restoreVolume {
+            guard checkedVolumeResult == .applied else { return checkedVolumeResult }
+            guard Set(state.volumes.keys) == Set(current.volumes.keys),
+                  state.volumes.values.allSatisfy({ $0.isFinite && (0...1).contains($0) }) else { return .failed }
+            current.volumes = state.volumes
+            calls.append(.setOutputVolume(uid: state.uid, volume: state.volume))
+            mockVolumes[state.uid] = state.volume
+        }
+        if restoreMute {
+            guard checkedMuteResult == .applied else { return checkedMuteResult }
+            current.mutes = state.mutes
+            calls.append(.setOutputMuted(uid: state.uid, muted: state.muted))
+            mockMutes[state.uid] = state.muted
+        }
+        mockDeviceStates[state.uid] = current
+        return .applied
+    }
+    public func outputVolume(uid: String) -> Float? { mockDeviceStates[uid]?.volume ?? mockVolumes[uid] ?? 0.8 }
     public func setOutputVolume(uid: String, _ volume: Float) {
         let clamped = max(0, min(1, volume))
         calls.append(.setOutputVolume(uid: uid, volume: clamped))
         mockVolumes[uid] = clamped
+        if let state = mockDeviceStates[uid] { mockDeviceStates[uid]?.volumes = state.volumes.mapValues { _ in clamped } }
     }
 
     private var mockMutes: [String: Bool] = [:]
-    public func outputMuted(uid: String) -> Bool { mockMutes[uid] ?? false }
+    public func outputMuted(uid: String) -> Bool { mockDeviceStates[uid]?.muted ?? mockMutes[uid] ?? false }
     public func setOutputMuted(uid: String, _ muted: Bool) {
         calls.append(.setOutputMuted(uid: uid, muted: muted))
         mockMutes[uid] = muted
+        if let state = mockDeviceStates[uid] { mockDeviceStates[uid]?.mutes = state.mutes.mapValues { _ in muted } }
     }
 
     private var checkedMuteResult: OutputWriteResult = .applied
@@ -154,6 +186,7 @@ public actor MockAudioEngine: AudioEngineProtocol {
     }
 
     public func updateRouterGains(config: BamConfig) {
+        calls.append(.updateRouterGains)
         routerConfig = config
     }
 

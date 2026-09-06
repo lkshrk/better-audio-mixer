@@ -37,8 +37,13 @@ jobs:
 
       - name: Build & test
         run: |
-          swift test --package-path BamKit
+          test -f BamKit/Package.resolved
+          test -f bam.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+          swift test --package-path BamKit --force-resolved-versions
+          python3 -B scripts/analyze-audio-latency.py --self-test
+          python3 -B scripts/tests/test_collect_audio_diagnostics.py
           xcodebuild -project bam.xcodeproj -scheme bam \
+            -onlyUsePackageVersionsFromResolvedFile \
             -configuration Debug -derivedDataPath .build \
             CODE_SIGNING_ALLOWED=NO \
             build test

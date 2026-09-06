@@ -71,6 +71,11 @@ final class Client: Hashable, @unchecked Sendable {
     var clientName: String?
     var readBuffer = Data()
     var recvBuffer = [UInt8](repeating: 0, count: 4096)
+    private(set) var lastSendError: Int32?
+
+    var peerClosedDuringSend: Bool {
+        lastSendError == EPIPE || lastSendError == ECONNRESET
+    }
 
     init(fd: Int32) { self.fd = fd }
 
@@ -86,13 +91,20 @@ final class Client: Hashable, @unchecked Sendable {
     /// Write a pre-encoded NDJSON frame (Data + "\n"). Returns false on EPIPE / error.
     /// Lets callers serialise off bgQueue and hand a Sendable `Data` across queues.
     func sendFrame(_ data: Data) -> Bool {
+        lastSendError = nil
         var line = data
         line.append(0x0A) // '\n'
         return line.withUnsafeBytes { buf -> Bool in
             var sent = 0
             while sent < buf.count {
                 let n = Darwin.send(fd, buf.baseAddress! + sent, buf.count - sent, MSG_NOSIGNAL)
-                if n <= 0 { return false }
+                if n < 0 {
+                    let error = errno
+                    if error == EINTR { continue }
+                    lastSendError = error
+                    return false
+                }
+                if n == 0 { return false }
                 sent += n
             }
             return true
@@ -338,12 +350,31 @@ public final class ControlServer: @unchecked Sendable {
         case "cmd":     guard client.handshakeDone else { return }; handleCmd(obj)
         case "listMixes": guard client.handshakeDone else { return }; handleListMixes(client: client)
         case "listOutputs": guard client.handshakeDone else { return }; handleListOutputs(client: client)
+        case "diagnostics": guard client.handshakeDone else { return }; handleAudioDiagnostics(client: client)
         case "setOutputDevice": guard client.handshakeDone else { return }; handleSetOutputDevice(obj, client: client)
         default:        break
         }
     }
 
     // MARK: - Hello
+
+    private struct DiagnosticsFrame: Encodable {
+        let t = "diagnostics"
+        let audio: AudioDiagnostics?
+    }
+
+    private func handleAudioDiagnostics(client: Client) {
+        Task { @MainActor [weak self] in
+            guard let self, let mixer else { return }
+            let snapshot = await mixer.audioDiagnostics()
+            guard let frame = try? JSONEncoder().encode(DiagnosticsFrame(audio: snapshot)) else { return }
+            self.bgQueue.async { [weak self] in
+                // Do not send through a descriptor that was removed/reused while awaiting the actor.
+                guard let self, self.clients.contains(where: { $0 === client }) else { return }
+                _ = client.sendFrame(frame)
+            }
+        }
+    }
 
     private func handleHello(_ obj: [String: Any], client: Client) {
         let v = obj["v"] as? Int ?? 0
@@ -526,9 +557,15 @@ public final class ControlServer: @unchecked Sendable {
         }
         if !dead.isEmpty {
             sendFailures += dead.count
-            ControlLog.logger.warning("removing dead clients after send failures count=\(dead.count, privacy: .public)")
         }
-        for client in dead { removeClient(client) }
+        for client in dead {
+            if client.peerClosedDuringSend {
+                ControlLog.logger.info("client disconnected during send fd=\(client.fd, privacy: .public)")
+            } else {
+                ControlLog.logger.error("client send failed fd=\(client.fd, privacy: .public) errno=\(client.lastSendError ?? 0, privacy: .public)")
+            }
+            removeClient(client)
+        }
     }
 
     // MARK: - Frame builders

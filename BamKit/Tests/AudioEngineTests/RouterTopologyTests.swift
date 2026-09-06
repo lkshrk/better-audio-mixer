@@ -36,7 +36,7 @@ final class RouterTopologyTests: XCTestCase {
         XCTAssertFalse(result)
     }
 
-    func testProductionEligibilityRejectsOldGenerationStaleHealthAndIncompleteTopology() {
+    func testProductionEligibilityDefersUnknownHealthButRejectsChangedTopology() {
         let now = ContinuousClock.now
         let formats = ["app": CoreAudioEngine.SourceFormat(sampleRate: 48_000, channels: 2)]
         func eligible(generation: Int? = 2, observed: ContinuousClock.Instant? = now,
@@ -50,9 +50,9 @@ final class RouterTopologyTests: XCTestCase {
         }
         XCTAssertTrue(eligible())
         XCTAssertFalse(eligible(generation: 1))
-        XCTAssertFalse(eligible(generation: nil))
-        XCTAssertFalse(eligible(observed: nil))
-        XCTAssertFalse(eligible(observed: now.advanced(by: .seconds(-4))))
+        XCTAssertTrue(eligible(generation: nil))
+        XCTAssertTrue(eligible(observed: nil))
+        XCTAssertTrue(eligible(observed: now.advanced(by: .seconds(-4))))
         XCTAssertFalse(eligible(devices: ["out": 2]), "same UID/new HAL object requires tap and aggregate rebuild")
         XCTAssertFalse(eligible(devices: [:]))
         XCTAssertFalse(eligible(sources: [:]))
@@ -69,5 +69,17 @@ final class RouterTopologyTests: XCTestCase {
         XCTAssertEqual(health.sourceStaleSamples, ["playing": 0])
         XCTAssertEqual(health.lastSourceFrames, ["playing": 20])
         XCTAssertTrue(health.sourceStaleSamples.values.allSatisfy { $0 == 0 })
+    }
+
+    func testNativeLimiterFailureRequiresRecoveryDespiteAdvancingInputAndOutput() {
+        var snapshot = RouterAggregate.HealthSnapshot(fires: 100, inputBuffers: 1, inputChannels: 2,
+            inputFrames: 48_000, outputBuffers: 1, outputChannels: 2, outputFrames: 48_000,
+            outputPeak: 0, limiterHits: 0)
+        let state = CoreAudioEngine.RouterHealthState()
+        XCTAssertTrue(snapshot.hasAdvancedIO)
+        XCTAssertTrue(snapshot.hasExpectedInput)
+        XCTAssertFalse(CoreAudioEngine.aggregateRecoveryRequired(snapshot: snapshot, state: state))
+        snapshot.limiterFailures = 1
+        XCTAssertTrue(CoreAudioEngine.aggregateRecoveryRequired(snapshot: snapshot, state: state))
     }
 }

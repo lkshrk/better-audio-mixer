@@ -94,6 +94,15 @@ jobs:
           fi
           echo "manifest $MANIFEST_VER matches tag $TAG"
 
+      - name: Require pinned dependencies
+        run: |
+          for lockfile in BamKit/Package.resolved bam.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved; do
+            if [ ! -f "$lockfile" ]; then
+              echo "::error::Release source lacks $lockfile. Backport dependency locks and create a new release tag; historical tags cannot be rebuilt reproducibly."
+              exit 1
+            fi
+          done
+
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode_26.6.app
 
@@ -127,6 +136,7 @@ jobs:
       - name: Build & sign (Developer ID)
         run: |
           xcodebuild -project bam.xcodeproj -scheme bam \
+            -onlyUsePackageVersionsFromResolvedFile \
             -configuration Release -derivedDataPath .build \
             CODE_SIGN_STYLE=Manual \
             CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
@@ -175,8 +185,8 @@ jobs:
       - name: Build plugin universal binary
         run: |
           cd BamKit
-          swift build -c release --arch arm64 --arch x86_64 --product BAMStreamDeck
-          BINDIR="$(swift build -c release --arch arm64 --arch x86_64 --product BAMStreamDeck --show-bin-path)"
+          swift build --force-resolved-versions -c release --arch arm64 --arch x86_64 --product BAMStreamDeck
+          BINDIR="$(swift build --force-resolved-versions -c release --arch arm64 --arch x86_64 --product BAMStreamDeck --show-bin-path)"
           echo "BINDIR=$BINDIR" >> "$GITHUB_ENV"
 
       - name: Assemble & sign plugin bundle
@@ -189,7 +199,7 @@ jobs:
           codesign --verify --strict --verbose=2 "$PLUGIN_DIR/bin/BAMStreamDeck"
 
       - name: Validate plugin (manifest, layouts, structure)
-        run: npx --yes @elgato/cli@latest validate "$PLUGIN_DIR"
+        run: npx --yes @elgato/cli@1.9.0 validate "$PLUGIN_DIR"
 
       - name: Notarize plugin
         env:
@@ -219,7 +229,7 @@ jobs:
           # online notarization check (document: first run needs network).
 
       - name: Package .streamDeckPlugin
-        run: npx --yes @elgato/cli@latest pack "$PLUGIN_DIR" --output dist --force
+        run: npx --yes @elgato/cli@1.9.0 pack "$PLUGIN_DIR" --output dist --force
 
       - name: Create GitHub release (app + plugin)
         env:

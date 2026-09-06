@@ -4,7 +4,41 @@ public enum OutputWriteResult: Sendable, Equatable {
     case applied, unsupported, failed
 }
 
+/// Exact writable hardware controls, separate from the user's master scalar.
+public struct OutputDeviceState: Sendable, Equatable {
+    public let uid: String
+    public let deviceID: UInt32
+    public var volumes: [UInt32: Float]
+    public var mutes: [UInt32: Bool]
+
+    public init(uid: String, deviceID: UInt32, volumes: [UInt32: Float], mutes: [UInt32: Bool]) {
+        self.uid = uid
+        self.deviceID = deviceID
+        self.volumes = volumes
+        self.mutes = mutes
+    }
+
+    public var volume: Float { volumes.isEmpty ? 0 : volumes.values.reduce(0, +) / Float(volumes.count) }
+    public var muted: Bool { !mutes.isEmpty && mutes.values.allSatisfy { $0 } }
+
+    /// Apply a master target to the original calibration, including when current hardware is zero.
+    /// A common gain preserves balance; the loudest channel bounds available hardware headroom.
+    public func withVolume(_ target: Float) -> OutputDeviceState {
+        guard target.isFinite else { return self }
+        var result = self
+        let target = max(0, min(1, target))
+        if volume > 0, let peak = volumes.values.max(), peak > 0 {
+            let gain = min(target / volume, 1 / peak)
+            result.volumes = volumes.mapValues { min(1, $0 * gain) }
+        } else {
+            result.volumes = volumes.mapValues { _ in target }
+        }
+        return result
+    }
+}
+
 public protocol AudioEngineProtocol: Sendable {
+    func audioDiagnostics() async -> AudioDiagnostics?
     func runningAudioApps() async -> [AudioApp]
     /// Bundle IDs of processes currently producing output audio (live playback).
     func playingBundleIDs() async -> Set<String>
@@ -26,6 +60,8 @@ public protocol AudioEngineProtocol: Sendable {
     func setOutputMuted(uid: String, _ muted: Bool) async
     func setOutputMutedChecked(uid: String, _ muted: Bool) async -> OutputWriteResult
     func setOutputVolumeChecked(uid: String, _ volume: Float) async -> OutputWriteResult
+    func outputDeviceState(uid: String) async -> OutputDeviceState?
+    func restoreOutputDeviceState(_ state: OutputDeviceState, restoreVolume: Bool, restoreMute: Bool) async -> OutputWriteResult
     /// True authorizes doing nothing only; never an unguarded subsequent rebuild.
     func canKeepCurrentRouter(config: BamConfig) async -> Bool
     func routerOutputUIDs(config: BamConfig) async -> Set<String>
@@ -56,6 +92,9 @@ public protocol AudioEngineProtocol: Sendable {
 }
 
 public extension AudioEngineProtocol {
+    func audioDiagnostics() async -> AudioDiagnostics? { nil }
+    func outputDeviceState(uid: String) async -> OutputDeviceState? { nil }
+    func restoreOutputDeviceState(_ state: OutputDeviceState, restoreVolume: Bool, restoreMute: Bool) async -> OutputWriteResult { .unsupported }
     func setRouterRecoverySuspended(_ suspended: Bool) async {}
     func stopRouterChecked() async -> Bool { false }
     func acknowledgeOutputRestore(uids: Set<String>) async {}

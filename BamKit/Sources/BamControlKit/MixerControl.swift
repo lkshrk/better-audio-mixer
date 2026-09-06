@@ -104,9 +104,15 @@ public protocol MixerControl: AnyObject {
 
     // MARK: Queries
     func listMixes() -> [MixSnapshot]
+    /// Read-only, on-demand audio telemetry; nil if the engine has no observation yet.
+    func audioDiagnostics() async -> AudioDiagnostics?
 
     // MARK: Output selection
     func listOutputs() -> [OutputSnapshot]
     /// Returns true if the switch was applied.
     func setOutputDevice(uid: String) -> Bool
+}
+
+public extension MixerControl {
+    func audioDiagnostics() async -> AudioDiagnostics? { nil }
 }

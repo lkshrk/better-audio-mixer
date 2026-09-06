@@ -84,6 +84,12 @@ final class RouterRecoveryTests: XCTestCase {
 
     func testDiagnosticsSnapshotSummarizesRouterState() async {
         let mock = MockAudioEngine()
+        var audio = AudioDiagnostics()
+        audio.sampleRate = 48000
+        audio.callbackCount = 1234
+        audio.limiterDelayFrames = 72
+        audio.overBufferBudgetCount = 2
+        await mock.setAudioDiagnosticsForTests(audio)
         await mock.scriptRouterStatuses([
             RouterStatus(failedMixIDs: ["m0"], cause: .noOutput),
         ])
@@ -100,10 +106,14 @@ final class RouterRecoveryTests: XCTestCase {
         XCTAssertEqual(diagnostics.audioRecoveryState, model.audioRecoveryDisplayState)
         XCTAssertEqual(diagnostics.boundOutputUID, "MockOutput")
         XCTAssertNil(diagnostics.controlServer)
+        XCTAssertEqual(diagnostics.audio, audio)
 
         let report = await model.diagnosticsReport()
         XCTAssertTrue(report.contains("routerCause: noOutput"))
         XCTAssertTrue(report.contains("failedMixIDs: m0"))
+        XCTAssertTrue(report.contains("audio.callbackCount: 1234"))
+        XCTAssertTrue(report.contains("audio.overBufferBudgetCount: 2"))
+        XCTAssertTrue(report.contains("not measured acoustic dropouts"))
         XCTAssertTrue(report.contains("boundOutputUID: MockOutput"))
         await model.stop()
     }
@@ -172,6 +182,44 @@ final class RouterRecoveryTests: XCTestCase {
         let healed = await eventually(4.0) { model.failedMixIDs.isEmpty }
         XCTAssertTrue(healed, "buildFailed heartbeat should retry and recover")
         XCTAssertEqual(model.routerStatus.cause, .ok)
+        await model.stop()
+    }
+
+    func testRepeatedFailureKeepsBoundedBackoffWithoutWallClockWaits() async {
+        let mock = MockAudioEngine()
+        let failure = RouterStatus(cause: .buildFailed)
+        await mock.scriptRouterStatuses(Array(repeating: failure, count: 8))
+        let model = ConsoleViewModel(engine: mock, defaults: defaults)
+        var delays: [Duration] = []
+        model.recoverySleep = { [weak model] delay in
+            delays.append(delay)
+            if delays.count == 7 {
+                model?.applyRouterStatus(.ok)
+            }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        await model.startMock(config: config())
+        let finished = await eventually { delays.count >= 7 }
+        XCTAssertTrue(finished)
+        XCTAssertEqual(delays, [2, 4, 8, 16, 30, 30, 30].map { .seconds($0) })
+        await model.stop()
+    }
+
+    func testChangedRecoveryCauseRestartsBackoff() async {
+        let mock = MockAudioEngine()
+        await mock.scriptRouterStatuses(Array(repeating: RouterStatus(cause: .buildFailed), count: 8))
+        let model = ConsoleViewModel(engine: mock, defaults: defaults)
+        var delays: [Duration] = []
+        model.recoverySleep = { [weak model] delay in
+            delays.append(delay)
+            if delays.count == 3 { model?.applyRouterStatus(RouterStatus(cause: .permissionPending)) }
+            if delays.count == 4 { model?.applyRouterStatus(.ok) }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        await model.startMock(config: config())
+        let finished = await eventually { delays.count >= 4 }
+        XCTAssertTrue(finished)
+        XCTAssertEqual(delays, [2, 4, 8, 2].map { .seconds($0) })
         await model.stop()
     }
 

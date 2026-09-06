@@ -15,6 +15,7 @@ struct ConsoleDiagnostics: Equatable {
     var sourceCount: Int
     var configPath: String?
     var controlServer: ControlServerDiagnostics?
+    var audio: AudioDiagnostics?
 }
 
 extension ConsoleViewModel {
@@ -31,7 +32,8 @@ extension ConsoleViewModel {
             mixCount: config.mixes.count,
             sourceCount: config.sources.count,
             configPath: configURL?.path,
-            controlServer: controlServer?.diagnosticsSnapshot()
+            controlServer: controlServer?.diagnosticsSnapshot(),
+            audio: await engine.audioDiagnostics()
         )
     }
 
@@ -57,6 +59,28 @@ extension ConsoleViewModel {
             lines.append("control.acceptedClients: \(control.acceptedClients)")
             lines.append("control.malformedFrames: \(control.malformedFrames)")
             lines.append("control.sendFailures: \(control.sendFailures)")
+        }
+        if let audio = snapshot.audio {
+            lines += [
+                "audio.generation: \(audio.generation)",
+                "audio.isRunning: \(audio.isRunning)",
+                "audio.sampleRate: \(audio.sampleRate)",
+                "audio.limiterDelayFrames: \(audio.limiterDelayFrames)",
+                "audio.callbackCount: \(audio.callbackCount)",
+                "audio.frames.last/min/max: \(audio.lastFrames)/\(audio.minFrames)/\(audio.maxFrames)",
+                "audio.callbackMilliseconds.last/mean/max: \(audio.lastCallbackMilliseconds)/\(audio.meanCallbackMilliseconds)/\(audio.maxCallbackMilliseconds)",
+                "audio.budgetRatio.last/mean/max: \(audio.lastBudgetRatio)/\(audio.meanBudgetRatio)/\(audio.maxBudgetRatio)",
+                "audio.overBufferBudgetCount: \(audio.overBufferBudgetCount)",
+                "audio.outputHostTimeEstimateSamples: \(audio.outputHostTimeEstimateSamples)",
+                "audio.outputHostTimeEstimateMisses: \(audio.outputHostTimeEstimateMisses)",
+                "audio.limiterInputOrGuardCallbacks: \(audio.limiterInputOrGuardCallbacks)",
+                "audio.limiterInputOverCeilingCallbacks: \(audio.limiterInputOverCeilingCallbacks)",
+                "audio.limiterGuardedSamples: \(audio.limiterGuardedSamples)",
+                "audio.limiterRenderFailures: \(audio.limiterRenderFailures)",
+                "audio.aggregateBuilds.attempts/successes/failures: \(audio.aggregateBuildAttempts)/\(audio.aggregateBuildSuccesses)/\(audio.aggregateBuildFailures)",
+                "audio.buildMilliseconds.last/max: \(audio.lastBuildMilliseconds)/\(audio.maxBuildMilliseconds)",
+                "audio.measurementNote: counters are estimates, not measured acoustic dropouts or end-to-end latency",
+            ]
         }
         return lines.joined(separator: "\n")
     }

@@ -6,6 +6,8 @@ import Foundation
 /// recorded `calls` array.
 @MainActor
 public final class MockMixerControl: MixerControl {
+    public var audioDiagnosticsSnapshot: AudioDiagnostics?
+    public func audioDiagnostics() async -> AudioDiagnostics? { audioDiagnosticsSnapshot }
 
     // MARK: - Scripted state
 

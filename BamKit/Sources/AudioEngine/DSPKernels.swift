@@ -2,6 +2,22 @@ import Accelerate
 
 enum DSPKernels {
     @inline(__always)
+    static func sumRamped(src: UnsafePointer<Float>, stride: Int, ramp: inout GainRamp,
+                          scale: Float = 1, dst: UnsafeMutablePointer<Float>, dstStride: Int, frames: Int) {
+        guard frames > 0 else { return }
+        if !ramp.isRamping {
+            sumScaledVDSP(src: src, stride: stride, gain: ramp.current * scale,
+                          dst: dst, dstStride: dstStride, frames: frames)
+            return
+        }
+        var i = 0
+        while i < frames {
+            dst[i * dstStride] += src[i * stride] * ramp.next() * scale
+            i += 1
+        }
+    }
+
+    @inline(__always)
     static func sumScaledScalar(src: UnsafePointer<Float>, stride: Int, gain: Float,
                                 dst: UnsafeMutablePointer<Float>, dstStride: Int, frames: Int) {
         var i = 0
@@ -50,17 +66,4 @@ enum DSPKernels {
         return peak
     }
 
-    @inline(__always)
-    static func ringDelaySwap(io: UnsafeMutablePointer<Float>, ioStride: Int,
-                              ring: UnsafeMutablePointer<Float>, ringBase: Int,
-                              writeIndex: Int, depth: Int, frames: Int) {
-        var fi = 0
-        while fi < frames {
-            let slot = ringBase + (writeIndex + fi) % depth
-            let d = ring[slot]
-            ring[slot] = io[fi * ioStride]
-            io[fi * ioStride] = d
-            fi += 1
-        }
-    }
 }

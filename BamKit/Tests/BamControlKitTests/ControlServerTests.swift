@@ -1,6 +1,28 @@
 import Darwin
+import BamCore
 import XCTest
 @testable import BamControlKit
+
+final class ClientTransportTests: XCTestCase {
+    func testClosedPeerIsNormalDisconnectRatherThanUnexpectedFailure() throws {
+        var fds: [Int32] = [-1, -1]
+        XCTAssertEqual(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds), 0)
+        guard fds[0] >= 0, fds[1] >= 0 else { return }
+        defer { Darwin.close(fds[0]) }
+        Darwin.close(fds[1])
+        let client = Client(fd: fds[0])
+        XCTAssertFalse(client.sendFrame(Data("{}".utf8)))
+        XCTAssertTrue(client.peerClosedDuringSend)
+        XCTAssertTrue(client.lastSendError == EPIPE || client.lastSendError == ECONNRESET)
+    }
+
+    func testInvalidDescriptorRemainsAnUnexpectedFailure() {
+        let client = Client(fd: -1)
+        XCTAssertFalse(client.sendFrame(Data("{}".utf8)))
+        XCTAssertEqual(client.lastSendError, EBADF)
+        XCTAssertFalse(client.peerClosedDuringSend)
+    }
+}
 
 // MARK: - Test fixture helpers
 
@@ -438,6 +460,34 @@ final class ControlServerTests: XCTestCase {
         XCTAssertEqual(mixes?.first?["id"] as? String, "m-game")
         XCTAssertEqual(mixes?.first?["name"] as? String, "Game")
         XCTAssertNotNil(mixes?.first?["emoji"])
+    }
+
+    func testAudioDiagnosticsRoundTripIsReadOnly() async throws {
+        var audio = AudioDiagnostics()
+        audio.generation = 7
+        audio.sampleRate = 48000
+        audio.callbackCount = 1234
+        audio.overBufferBudgetCount = 2
+        audio.limiterGuardedSamples = 3
+        audio.aggregateBuildAttempts = 4
+        mock.audioDiagnosticsSnapshot = audio
+        let (fd, buf) = try await handshake()
+        defer { Darwin.close(fd) }
+        try writeLine(fd, ["t": "diagnostics"])
+        let frame = try await readFrameOfType(fd, buf: buf, type: "diagnostics")
+        let payload = try XCTUnwrap(frame["audio"] as? [String: Any])
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        XCTAssertEqual(try JSONDecoder().decode(AudioDiagnostics.self, from: data), audio)
+        XCTAssertTrue(mock.calls.isEmpty)
+    }
+
+    func testAudioDiagnosticsUnavailableDoesNotInventMeasurements() async throws {
+        let (fd, buf) = try await handshake()
+        defer { Darwin.close(fd) }
+        try writeLine(fd, ["t": "diagnostics"])
+        let frame = try await readFrameOfType(fd, buf: buf, type: "diagnostics")
+        XCTAssertNil(frame["audio"])
+        XCTAssertTrue(mock.calls.isEmpty)
     }
 
     func testListOutputsResponse() async throws {

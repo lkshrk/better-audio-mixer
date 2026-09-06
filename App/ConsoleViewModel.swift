@@ -54,12 +54,30 @@ final class ConsoleViewModel {
     private var meterTask: Task<Void, Never>?
     private var appsTask: Task<Void, Never>?
     private var recoveryTask: Task<Void, Never>?
+    private var recoveryCause: RouterFailureCause?
+    private var recoveryGeneration = 0
+    var recoverySleep: @MainActor (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
+    var outputRampSleep: @MainActor (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
     private var routerEventTask: Task<Void, Never>?
     private var routerRecoveryEventTask: Task<Void, Never>?
     private var defaultOutputUID: String?
     var controlServer: ControlServer?
     private var controlPushTask: Task<Void, Never>?
     private var routerMutationTask: Task<Void, Never>?
+    private final class GainTargets {
+        var config: BamConfig
+        init(_ config: BamConfig) { self.config = config }
+    }
+    private var pendingGains: GainTargets?
+    final class OutputTargets {
+        var volumes: [String: Float] = [:]
+        var muteUIDs: Set<String> = []
+    }
+    var pendingOutputTargets: OutputTargets?
+    var requestedOutputVolumes: [String: Float] = [:]
+    var rampOutputTargets: [String: Float] = [:]
+    var stockOutputStates: [String: OutputDeviceState] = [:]
+    var outputCalibrations: [String: OutputDeviceState] = [:]
     var routerWorkGeneration = 0
 
     /// The catch-all device. Its source is the `.rest` remainder; it routes every
@@ -153,8 +171,8 @@ final class ConsoleViewModel {
     /// the user's own normal level.
     private func captureStockVolume() async {
         guard let uid = systemOutputUID else { return }
-        guard let v = await engine.outputVolume(uid: uid) else { return }
-        defaults.set(Double(v), forKey: Self.stockVolumeKey)
+        guard let state = await captureOutputState(uid: uid) else { return }
+        defaults.set(Double(state.volume), forKey: Self.stockVolumeKey)
     }
 
     /// Headless entry for previews/mocks: no disk, just drive the engine + meters.
@@ -162,6 +180,7 @@ final class ConsoleViewModel {
         defaultOutputUID = await engine.defaultOutputUID()
         self.config = Self.normalize(config, defaultOutput: defaultOutputUID)
         activeMixID = self.config.mixes.first?.id
+        await captureStockVolume()
         await subscribe()
     }
 
@@ -206,6 +225,8 @@ final class ConsoleViewModel {
             AppLog.router.debug("\(reason, privacy: .public)")
         }
         recoveryTask?.cancel(); recoveryTask = nil
+        recoveryCause = nil
+        recoveryGeneration += 1
         routerEventTask?.cancel(); routerEventTask = nil
         routerRecoveryEventTask?.cancel(); routerRecoveryEventTask = nil
         meterTask?.cancel(); meterTask = nil
@@ -239,7 +260,9 @@ final class ConsoleViewModel {
     /// engine resolves it against the live list, and we write the resolved UID back
     /// so the Default mix points at the right device across restarts.
     private func startRouterReconciling() async {
+        let generation = routerWorkGeneration
         let status = await startRouterGuarded(config: config)
+        guard generation == routerWorkGeneration, !Task.isCancelled, driverEnabled else { return }
         applyRouterStatus(status)
         guard let bound = await engine.boundOutputUID(),
               let i = config.mixes.firstIndex(where: { $0.id == Self.defaultMixID })
@@ -286,18 +309,24 @@ final class ConsoleViewModel {
     /// event. Both use a bounded backoff heartbeat (2→4→8→16→30s, capped) that
     /// stops as soon as the router comes online or the driver is turned off.
     private func scheduleRouterRecovery(for status: RouterStatus) {
+        if driverEnabled, recoveryTask != nil, recoveryCause == status.cause { return }
         recoveryTask?.cancel(); recoveryTask = nil
+        recoveryCause = nil
+        recoveryGeneration += 1
         guard driverEnabled, status.cause == .permissionPending || status.cause == .buildFailed else { return }
         let cause = status.cause
+        let heartbeatGeneration = recoveryGeneration
+        recoveryCause = cause
         AppLog.router.debug("router recovery heartbeat scheduled cause=\(cause.rawValue, privacy: .public)")
         recoveryTask = Task { [weak self] in
             var delay: UInt64 = 2
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(Double(delay)))
+                guard let sleep = self?.recoverySleep else { return }
+                do { try await sleep(.seconds(Double(delay))) } catch { return }
                 guard let self, self.driverEnabled, !Task.isCancelled else { return }
                 AppLog.router.debug("router recovery heartbeat cause=\(cause.rawValue, privacy: .public) delay=\(delay, privacy: .public)s")
                 await self.enqueueRouterWork { model in
-                    guard !Task.isCancelled else { return }
+                    guard !Task.isCancelled, model.recoveryGeneration == heartbeatGeneration else { return }
                     await model.startRouterReconciling()
                 }.value
                 if self.routerStatus.cause != cause { return }
@@ -429,8 +458,16 @@ final class ConsoleViewModel {
     var restoringVolume = false
 
     struct GuardedOutput {
-        var volume: Float
-        var muted: Bool
+        var state: OutputDeviceState
+        let calibration: OutputDeviceState
+        var volume: Float {
+            get { state.volume }
+            set { state.volumes = calibration.withVolume(newValue).volumes }
+        }
+        var muted: Bool {
+            get { state.muted }
+            set { state.mutes = newValue ? state.mutes.mapValues { _ in true } : calibration.mutes }
+        }
     }
     // Keep user intent across failed rebuilds; HAL may reset the hardware to 100%.
     var guardedOutputs: [String: GuardedOutput] = [:]
@@ -463,24 +500,41 @@ final class ConsoleViewModel {
     }
 
     private func enqueueRouterMutation(topology: Bool, draft: BamConfig) {
-        enqueueRouterWork { model in
-            if topology {
-                let status = await model.startRouterGuarded(config: draft)
-                guard !Task.isCancelled else { return }
-                model.applyRouterStatus(status)
-            } else {
-                await model.engine.updateRouterGains(config: draft)
+        if !topology {
+            if let pendingGains {
+                pendingGains.config = draft
+                return
             }
+            let targets = GainTargets(draft)
+            enqueueRouterWork(isControlUpdate: true) { model in
+                if model.pendingGains === targets { model.pendingGains = nil }
+                await model.engine.updateRouterGains(config: targets.config)
+            }
+            pendingGains = targets
+            return
+        }
+        enqueueRouterWork { model in
+            let generation = model.routerWorkGeneration
+            let status = await model.startRouterGuarded(config: draft)
+            guard !Task.isCancelled, generation == model.routerWorkGeneration else { return }
+            model.applyRouterStatus(status)
         }
     }
 
     @discardableResult
-    func enqueueRouterWork(_ work: @escaping @MainActor (ConsoleViewModel) async -> Void) -> Task<Void, Never> {
+    func enqueueRouterWork(requiresDriver: Bool = true, isControlUpdate: Bool = false,
+                           _ work: @escaping @MainActor (ConsoleViewModel) async -> Void) -> Task<Void, Never> {
+        // Every serialized operation is a boundary: a gain snapshot must never
+        // cross a later topology mutation and put its old routes back.
+        if !isControlUpdate {
+            pendingGains = nil
+            pendingOutputTargets = nil
+        }
         let previous = routerMutationTask
         let generation = routerWorkGeneration
         routerMutationTask = Task { [weak self] in
             await previous?.value
-            guard let self, self.driverEnabled, !Task.isCancelled,
+            guard let self, (!requiresDriver || self.driverEnabled), !Task.isCancelled,
                   self.routerWorkGeneration == generation else { return }
             await work(self)
         }
@@ -493,6 +547,8 @@ final class ConsoleViewModel {
         pending?.cancel()
         await pending?.value
         routerMutationTask = nil
+        pendingGains = nil
+        pendingOutputTargets = nil
     }
 
     func pendingRouterWorkForExit() -> Task<Void, Never>? {

@@ -7,6 +7,7 @@ import Foundation
 /// per-device position uses the cube `AudioTaper`, while master volume passes through
 /// linear (the hardware scalar is already perceptual).
 extension ConsoleViewModel: MixerControl {
+    func audioDiagnostics() async -> AudioDiagnostics? { await engine.audioDiagnostics() }
 
     var controlSnapshot: ControlSnapshot {
         let mixes = devices.map { mix -> MixSnapshot in

@@ -1,5 +1,6 @@
 import XCTest
 import BamCore
+import CoreAudio
 @testable import AudioEngine
 
 final class RouterRecoveryGuardTests: XCTestCase {
@@ -130,6 +131,75 @@ final class RouterRecoveryGuardTests: XCTestCase {
         let engine = await engine(calls, initiallyMuted: true)
         await engine.recoverRouterForTests(reason: .aggregateStalled)
         XCTAssertEqual(calls.events, ["mute", "teardown", "rebuild", "volume:0.4"])
+    }
+
+    func testFailedAggregateTeardownKeepsProtectionAndRetriesBeforeRebuilding() async {
+        for failedStage in ["stop", "callback", "aggregate"] {
+            let calls = RecoveryRecorder()
+            let engine = await engine(calls)
+            let resources = RouterAggregate.IOResources(operations: .init(
+                stop: { _, _ in calls.record("stop"); return failedStage == "stop" && calls.volume == 0.4 ? -1 : noErr },
+                destroyIOProc: { _, _ in calls.record("callback"); return failedStage == "callback" && calls.volume == 0.4 ? -1 : noErr },
+                destroyAggregate: { _ in calls.record("aggregate"); return failedStage == "aggregate" && calls.volume == 0.4 ? -1 : noErr },
+                isGone: { _ in false }))
+            resources.aggregateID = 42
+            resources.ioProcID = { _, _, _, _, _, _, _ in noErr }
+            await engine.installRouterForTests(resources: resources)
+            await engine.recoverRouterForTests(reason: .aggregateStalled)
+            XCTAssertFalse(calls.events.contains("rebuild"))
+            XCTAssertFalse(calls.events.contains("unmute"))
+            XCTAssertFalse(calls.events.contains("volume:0.4"))
+            let retained = await engine.hasRouterForTests()
+            XCTAssertTrue(retained)
+            // Retry uses retained resources and original output intent, even if
+            // HAL's protected volume scalar changed in the meantime.
+            calls.volume = 1
+            calls.reset()
+            await engine.recoverRouterForTests(reason: .aggregateStalled)
+            XCTAssertEqual(Array(calls.events.suffix(3)), ["rebuild", "volume:0.4", "unmute"])
+            let released = await engine.hasRouterForTests()
+            XCTAssertFalse(released)
+            await engine.resetRouterRecovery()
+        }
+    }
+
+    func testCheckedStopReportsTeardownFailureAndRetainsRouterForRetry() async {
+        let calls = RecoveryRecorder()
+        let engine = await engine(calls)
+        let resources = RouterAggregate.IOResources(operations: .init(
+            stop: { _, _ in calls.volume == 0.4 ? -1 : noErr },
+            destroyIOProc: { _, _ in noErr }, destroyAggregate: { _ in noErr }, isGone: { _ in false }))
+        resources.aggregateID = 42
+        resources.ioProcID = { _, _, _, _, _, _, _ in noErr }
+        await engine.installRouterForTests(resources: resources)
+        let failed = await engine.stopRouterChecked()
+        XCTAssertFalse(failed)
+        XCTAssertEqual(calls.events, ["mute"])
+        calls.volume = 1
+        let succeeded = await engine.stopRouterChecked()
+        XCTAssertTrue(succeeded)
+        XCTAssertEqual(calls.events, ["mute", "mute"])
+    }
+
+    func testPartialStartAggregateRemainsEngineOwnedUntilCleanupSucceeds() async {
+        let calls = RecoveryRecorder()
+        let engine = await engine(calls)
+        let resources = RouterAggregate.IOResources(operations: .init(
+            stop: { _, _ in XCTFail("Start did not create a callback"); return -1 },
+            destroyIOProc: { _, _ in XCTFail("No callback"); return -1 },
+            destroyAggregate: { _ in calls.volume == 0.4 ? -1 : noErr }, isGone: { _ in false }))
+        resources.aggregateID = 42
+        await engine.installRouterForTests(resources: resources)
+        let failed = await engine.stopRouterChecked()
+        XCTAssertFalse(failed)
+        let retained = await engine.hasRouterForTests()
+        XCTAssertTrue(retained)
+        XCTAssertEqual(calls.events, ["mute"])
+        calls.volume = 1
+        let succeeded = await engine.stopRouterChecked()
+        XCTAssertTrue(succeeded)
+        let released = await engine.hasRouterForTests()
+        XCTAssertFalse(released)
     }
 }
 

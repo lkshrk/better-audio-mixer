@@ -95,7 +95,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         return deviceMuted(uid: uid)
     }
 
-    private var recoveryOutputIntent: [String: (volume: Float, muted: Bool)] = [:]
+    private var recoveryOutputIntent: [String: OutputDeviceState] = [:]
     private var protectedOutputUIDs = Set<String>()
     struct RecoveryTestHooks: Sendable {
         let outputUIDs: Set<String>
@@ -115,6 +115,10 @@ public actor CoreAudioEngine: AudioEngineProtocol {
     func retryAfterRearmForTests(reason: RecoveryReason) {
         retryAfterRearm(reason: reason, signature: "test-generation")
     }
+    func installRouterForTests(resources: sending RouterAggregate.IOResources) {
+        router = RouterAggregate(taps: [], resources: resources)
+    }
+    func hasRouterForTests() -> Bool { router != nil }
 
     /// The output UID the running aggregate is actually bound to, after live-list
     /// resolution. May differ from the stored config UID when a device re-enumerated;
@@ -124,6 +128,33 @@ public actor CoreAudioEngine: AudioEngineProtocol {
     // Router: one aggregate (all source taps + the selected output) summing
     // each tap × its gain in a single hardware-clocked IOProc.
     private var router: RouterAggregate?
+    private var lastAudioDiagnostics: AudioDiagnostics?
+    private var diagnosticsGeneration = 0
+    private var buildDiagnostics = AudioDiagnostics()
+
+    public func audioDiagnostics() async -> AudioDiagnostics? {
+        let current = router?.audioDiagnostics()
+        var snapshot = current ?? lastAudioDiagnostics ?? AudioDiagnostics()
+        if current != nil { snapshot.generation = diagnosticsGeneration }
+        snapshot.isRunning = router != nil && routerTapSig != nil
+        snapshot.aggregateBuildAttempts = buildDiagnostics.aggregateBuildAttempts
+        snapshot.aggregateBuildSuccesses = buildDiagnostics.aggregateBuildSuccesses
+        snapshot.aggregateBuildFailures = buildDiagnostics.aggregateBuildFailures
+        snapshot.lastBuildMilliseconds = buildDiagnostics.lastBuildMilliseconds
+        snapshot.maxBuildMilliseconds = buildDiagnostics.maxBuildMilliseconds
+        return snapshot
+    }
+
+    private func recordAggregateBuild(success: Bool, milliseconds: Double) {
+        buildDiagnostics.aggregateBuildAttempts = CallbackDiagnostics.increment(buildDiagnostics.aggregateBuildAttempts)
+        if success {
+            buildDiagnostics.aggregateBuildSuccesses = CallbackDiagnostics.increment(buildDiagnostics.aggregateBuildSuccesses)
+        } else {
+            buildDiagnostics.aggregateBuildFailures = CallbackDiagnostics.increment(buildDiagnostics.aggregateBuildFailures)
+        }
+        buildDiagnostics.lastBuildMilliseconds = max(0, milliseconds)
+        buildDiagnostics.maxBuildMilliseconds = max(buildDiagnostics.maxBuildMilliseconds, milliseconds)
+    }
     private var routerConfig: BamConfig?
     private var routerHealthBaseline: RouterHealthBaseline?
     private var routerHealthTask: Task<Void, Never>?
@@ -152,6 +183,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
     }
 
     private struct RouterHealthBaseline {
+        let generation: Int
         let outputUID: String
         let outputSampleRate: Double?
         let sourceFormats: [String: SourceFormat]
@@ -233,6 +265,108 @@ public actor CoreAudioEngine: AudioEngineProtocol {
 
     public func outputVolume(uid: String) -> Float? { recoveryOutputIntent[uid]?.volume ?? Self.resolvedDeviceVolume(uid: uid) }
 
+    public func outputDeviceState(uid: String) async -> OutputDeviceState? {
+        recoveryOutputIntent[uid] ?? Self.resolvedDeviceState(uid: uid)
+    }
+
+    /// Synchronous snapshot for termination, before the caller protects physical output.
+    public nonisolated static func deviceState(uid: String) -> OutputDeviceState? {
+        resolvedDeviceState(uid: uid)
+    }
+
+    public func restoreOutputDeviceState(_ state: OutputDeviceState, restoreVolume: Bool, restoreMute: Bool) async -> OutputWriteResult {
+        restoreDeviceState(state, restoreVolume: restoreVolume, restoreMute: restoreMute)
+    }
+
+    private static func resolvedDeviceState(uid: String) -> OutputDeviceState? {
+        if let ops = deviceOpsStore.get() {
+            guard let volume = ops.volume(uid), volume.isFinite else { return nil }
+            return OutputDeviceState(uid: uid, deviceID: 0, volumes: [0: volume], mutes: [0: ops.muted(uid)])
+        }
+        guard let device = ProcessEnumerator.deviceID(forUID: uid) else { return nil }
+        return captureDeviceState(uid: uid, deviceID: device, channels: outputChannelCount(device: device) ?? 0,
+            volume: { CA.float32(device, CA.address(kAudioDevicePropertyVolumeScalar, kAudioDevicePropertyScopeOutput, $0)) },
+            mute: { element in
+                var address = CA.address(kAudioDevicePropertyMute, kAudioDevicePropertyScopeOutput, element)
+                var value: UInt32 = 0
+                var size = UInt32(MemoryLayout<UInt32>.size)
+                guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &value) == noErr else { return nil }
+                return value != 0
+            },
+            settable: { CA.isSettable(device, CA.address($0, kAudioDevicePropertyScopeOutput, $1)) })
+    }
+
+    /// Shared capture path; a partial/unreadable control set cannot safely be restored.
+    nonisolated static func captureDeviceState(
+        uid: String, deviceID: UInt32, channels: Int,
+        volume: (UInt32) -> Float?, mute: (UInt32) -> Bool?,
+        settable: (AudioObjectPropertySelector, UInt32) -> Bool
+    ) -> OutputDeviceState? {
+        func elements(_ selector: AudioObjectPropertySelector) -> [UInt32] {
+            if settable(selector, 0) { return [0] }
+            return channels > 0 ? (1...channels).map(UInt32.init) : []
+        }
+        let volumeElements = elements(kAudioDevicePropertyVolumeScalar)
+        let muteElements = elements(kAudioDevicePropertyMute)
+        guard !volumeElements.isEmpty, !muteElements.isEmpty else { return nil }
+        var volumes: [UInt32: Float] = [:]
+        var mutes: [UInt32: Bool] = [:]
+        for element in volumeElements {
+            guard settable(kAudioDevicePropertyVolumeScalar, element), let value = volume(element),
+                  value.isFinite, (0...1).contains(value) else { return nil }
+            volumes[element] = value
+        }
+        for element in muteElements {
+            guard settable(kAudioDevicePropertyMute, element), let value = mute(element) else { return nil }
+            mutes[element] = value
+        }
+        return OutputDeviceState(uid: uid, deviceID: deviceID, volumes: volumes, mutes: mutes)
+    }
+
+    private func restoreDeviceState(_ state: OutputDeviceState, restoreVolume: Bool, restoreMute: Bool) -> OutputWriteResult {
+        let result: OutputWriteResult
+        if let ops = Self.deviceOpsStore.get() {
+            guard state.deviceID == 0, Set(state.volumes.keys) == [0], Set(state.mutes.keys) == [0] else { return .failed }
+            if restoreVolume {
+                let written = ops.setVolume(state.uid, state.volume)
+                guard written == .applied else { return written }
+            }
+            result = restoreMute ? ops.setMuted(state.uid, state.muted) : .applied
+        } else {
+            guard let current = Self.resolvedDeviceState(uid: state.uid), current.deviceID == state.deviceID else { return .failed }
+            result = Self.writeDeviceState(state, current: current, restoreVolume: restoreVolume, restoreMute: restoreMute,
+                volume: { CA.setFloat32(state.deviceID, CA.address(kAudioDevicePropertyVolumeScalar, kAudioDevicePropertyScopeOutput, $0), $1) },
+                mute: { CA.setUInt32(state.deviceID, CA.address(kAudioDevicePropertyMute, kAudioDevicePropertyScopeOutput, $0), $1 ? 1 : 0) })
+        }
+        if restoreMute {
+            if result == .applied && state.muted { protectedOutputUIDs.insert(state.uid) }
+            else { protectedOutputUIDs.remove(state.uid) }
+        }
+        return result
+    }
+
+    /// Validates the complete saved shape before touching any element; volume failure never unmutes.
+    nonisolated static func writeDeviceState(
+        _ state: OutputDeviceState, current: OutputDeviceState, restoreVolume: Bool, restoreMute: Bool,
+        volume: (UInt32, Float) -> Bool, mute: (UInt32, Bool) -> Bool
+    ) -> OutputWriteResult {
+        guard state.uid == current.uid, state.deviceID == current.deviceID,
+              !state.volumes.isEmpty, !state.mutes.isEmpty,
+              Set(state.volumes.keys) == Set(current.volumes.keys), Set(state.mutes.keys) == Set(current.mutes.keys),
+              state.volumes.values.allSatisfy({ $0.isFinite && (0...1).contains($0) }) else { return .failed }
+        if restoreVolume {
+            for element in state.volumes.keys.sorted() {
+                guard volume(element, state.volumes[element]!) else { return .failed }
+            }
+        }
+        if restoreMute {
+            for element in state.mutes.keys.sorted() {
+                guard mute(element, state.mutes[element]!) else { return .failed }
+            }
+        }
+        return .applied
+    }
+
     private static func deviceSampleRate(uid: String) -> Double? {
         guard let dev = ProcessEnumerator.deviceID(forUID: uid) else { return nil }
         return CA.float64(dev, CA.address(kAudioDevicePropertyNominalSampleRate))
@@ -253,7 +387,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
     public func setOutputVolume(uid: String, _ volume: Float) {
         Self.setDeviceVolume(uid: uid, volume)
         if let intended = recoveryOutputIntent[uid], volume.isFinite {
-            recoveryOutputIntent[uid] = (max(0, min(1, volume)), intended.muted)
+            recoveryOutputIntent[uid]?.volumes = intended.volumes.mapValues { _ in max(0, min(1, volume)) }
         }
     }
 
@@ -302,7 +436,9 @@ public actor CoreAudioEngine: AudioEngineProtocol {
     }
 
     public func setOutputMuted(uid: String, _ muted: Bool) {
-        if let intended = recoveryOutputIntent[uid] { recoveryOutputIntent[uid] = (intended.volume, muted) }
+        if let intended = recoveryOutputIntent[uid] {
+            recoveryOutputIntent[uid]?.mutes = intended.mutes.mapValues { _ in muted }
+        }
         guard let dev = ProcessEnumerator.deviceID(forUID: uid) else { return }
         let v: UInt32 = muted ? 1 : 0
         let main = CA.address(kAudioDevicePropertyMute, kAudioDevicePropertyScopeOutput)
@@ -420,8 +556,8 @@ public actor CoreAudioEngine: AudioEngineProtocol {
     private func performGuardedOutputRebuild(uids: Set<String>, unmute: Bool, _ rebuild: () -> Bool) -> Bool {
         guard !uids.isEmpty else { return false }
         for uid in uids where recoveryOutputIntent[uid] == nil {
-            guard let volume = Self.resolvedDeviceVolume(uid: uid), volume.isFinite else { return false }
-            recoveryOutputIntent[uid] = (volume, Self.resolvedDeviceMuted(uid: uid))
+            guard let state = Self.resolvedDeviceState(uid: uid) else { return false }
+            recoveryOutputIntent[uid] = state
         }
         for uid in uids {
             guard writeOutputMute(uid: uid, true) == .applied else {
@@ -430,15 +566,15 @@ public actor CoreAudioEngine: AudioEngineProtocol {
             }
         }
         guard rebuild() else { return false }
-        // Restore every scalar before any unmute; failed writes retain intent for retry.
+        // Restore every exact volume element before any unmute; retain intent on failure.
         for uid in uids {
             guard let intent = recoveryOutputIntent[uid],
-                  Self.resolvedSetDeviceVolume(uid: uid, intent.volume) == .applied else { return false }
+                  restoreDeviceState(intent, restoreVolume: true, restoreMute: false) == .applied else { return false }
         }
         for uid in uids {
             guard let intent = recoveryOutputIntent[uid] else { continue }
             if unmute && !intent.muted {
-                guard writeOutputMute(uid: uid, false) == .applied else { return false }
+                guard restoreDeviceState(intent, restoreVolume: false, restoreMute: true) == .applied else { return false }
             }
             recoveryOutputIntent[uid] = nil
         }
@@ -498,10 +634,10 @@ public actor CoreAudioEngine: AudioEngineProtocol {
     }
 
     public func canKeepCurrentRouter(config: BamConfig) async -> Bool {
-        guard config == routerConfig, let router, let lastHealthyObservation,
-              lastHealthyObservation.duration(to: .now) <= .seconds(3),
-              rearmTasks.isEmpty, recoveryOutputIntent.isEmpty,
-              let baseline = routerHealthBaseline, let expectedRate = baseline.outputSampleRate,
+        guard config == routerConfig, let router, routerHealthTask != nil,
+              rearmTasks.isEmpty, suspendedRecoveries.isEmpty, recoveryOutputIntent.isEmpty,
+              let baseline = routerHealthBaseline, baseline.generation == routerGeneration,
+              let expectedRate = baseline.outputSampleRate,
               let currentRate = Self.deviceSampleRate(uid: baseline.outputUID),
               abs(expectedRate - currentRate) <= 1 else { return false }
         let stored = config.mixes.compactMap { mix -> String? in
@@ -519,8 +655,8 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         guard let selfObject = processes.first(where: { $0.pid == getpid() })?.objectID else { return false }
         let desired = Self.desiredTapSpecs(config: config, processes: processes,
                                           captureUID: capture, selfObjectID: selfObject)
-        let health = router.healthSnapshot()
-        guard health.hasAdvancedIO, health.hasExpectedInput else { return false }
+        // Startup/stale health is not evidence that an unchanged router needs mutation.
+        // The generation-bound monitor independently observes stalls and owns guarded recovery.
         return Self.canKeepRouterTopology(
             desired: Dictionary(uniqueKeysWithValues: desired.map { ($0.sourceID, $0.sig) }),
             live: liveTaps.mapValues(\.sig),
@@ -538,7 +674,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         !current.isEmpty && current == applied
     }
 
-    /// Pure final eligibility decision used after read-only discovery; unknown observations fail closed.
+    /// Authorizes no mutation only. Unknown/stale health is left to the health monitor.
     nonisolated static func canKeepRouterTopology(
         desired: [String: String], live: [String: String],
         currentDevices: [String: AudioObjectID], appliedDevices: [String: AudioObjectID],
@@ -546,8 +682,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         generation: Int, healthyGeneration: Int?, observedAt: ContinuousClock.Instant?,
         now: ContinuousClock.Instant = .now
     ) -> Bool {
-        guard generation == healthyGeneration, let observedAt,
-              observedAt.duration(to: now) >= .zero, observedAt.duration(to: now) <= .seconds(3),
+        guard (healthyGeneration == nil || generation == healthyGeneration),
               !desired.isEmpty, desired == live,
               sameDeviceTopology(currentDevices, appliedDevices),
               Set(currentFormats.keys) == Set(desired.keys),
@@ -564,7 +699,6 @@ public actor CoreAudioEngine: AudioEngineProtocol {
     /// hardware-clocked aggregate that sums each tap × its gain to the output.
     /// Returns mix ids that could not be brought online (empty on success).
     public func startRouter(config: BamConfig) -> RouterStatus {
-        lastHealthyObservation = nil
         let requiredOutputs = resolvedRouterOutputUIDs(config: config)
         guard !requiredOutputs.isEmpty, requiredOutputs.isSubset(of: protectedOutputUIDs) else {
             return RouterStatus(failedMixIDs: config.mixes.map(\.id), cause: .buildFailed)
@@ -584,7 +718,9 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         let outputUID = Self.resolveOutputUID(stored: storedUID)
         guard let outputUID else {
             bamLog("startRouter: no output device (no hardware dest, no default output) — all \(config.mixes.count) mixes offline", level: .error)
-            router = nil
+            guard closeRouter() else {
+                return RouterStatus(failedMixIDs: config.mixes.map(\.id), cause: .buildFailed)
+            }
             _boundOutputUID = nil
             return RouterStatus(failedMixIDs: config.mixes.map(\.id), cause: .noOutput)
         }
@@ -609,8 +745,9 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         if !appliedDeviceIDs.isEmpty && !Self.sameDeviceTopology(currentDeviceIDs, appliedDeviceIDs) {
             // A stable UID can name a new HAL object after reconnect.
             routerGeneration += 1
-            router = nil
-            routerTapSig = nil
+            guard closeRouter() else {
+                return RouterStatus(failedMixIDs: config.mixes.map(\.id), cause: .buildFailed)
+            }
             if currentDeviceIDs[captureUID] != appliedDeviceIDs[captureUID] { liveTaps.removeAll() }
         }
         if captureUID != outputUID {
@@ -648,14 +785,16 @@ public actor CoreAudioEngine: AudioEngineProtocol {
             bamLog("startRouter: process tap creation failed for sources \(failedTapSourceIDs.sorted().joined(separator: ",")); likely audio-capture permission not yet granted; \(failedMixIDs.count) mixes offline", level: .error)
             return RouterStatus(failedMixIDs: failedMixIDs, cause: .permissionPending)
         }
-        // Taps dropped here (no longer desired) deinit and unmute their apps —
-        // correct: those apps left their group and should hear themselves again.
-        liveTaps = newLive
         routerConfig = config
 
         // No grouped app is running yet → nothing to route. Idle, not offline.
         guard !orderedTaps.isEmpty else {
-            router = nil; routerTapSig = nil
+            lastHealthyObservation = nil
+            healthyGeneration = nil
+            guard closeRouter() else {
+                return RouterStatus(failedMixIDs: config.mixes.map(\.id), cause: .buildFailed)
+            }
+            liveTaps = newLive
             routerHealthBaseline = nil
             routerHealthTask?.cancel()
             routerHealthTask = nil
@@ -679,18 +818,30 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         var builtOK = true
         var failureStatus = RouterStatus(failedMixIDs: config.mixes.map(\.id), cause: .buildFailed)
         func doRebuild() {
+            lastHealthyObservation = nil
+            healthyGeneration = nil
             routerGeneration += 1
             routerHealthTask?.cancel()
             routerHealthTask = nil
             routerHealthBaseline = nil
-            router = nil
+            guard closeRouter() else { builtOK = false; return }
+            // Drop obsolete taps only after the previous callback and aggregate
+            // are confirmed gone, with the output still protected.
+            liveTaps = newLive
             let aggregateSignpostID = engineSignposter.makeSignpostID()
             let aggregateSignpostState = engineSignposter.beginInterval("CoreAudioEngine.rebuildAggregate", id: aggregateSignpostID)
             var aggregateFailure: RouterAggregate.BuildFailure?
-            guard let agg = RouterAggregate(outputUID: outputUID, taps: orderedTaps, failure: &aggregateFailure) else {
+            let agg = RouterAggregate(taps: orderedTaps)
+            router = agg
+            diagnosticsGeneration = routerGeneration
+            let buildStart = ProcessInfo.processInfo.systemUptime
+            let started = agg.start(outputUID: outputUID, failure: &aggregateFailure)
+            recordAggregateBuild(success: started, milliseconds: (ProcessInfo.processInfo.systemUptime - buildStart) * 1000)
+            guard started else {
                 engineSignposter.endInterval("CoreAudioEngine.rebuildAggregate", aggregateSignpostState)
                 bamLog("startRouter: aggregate build failed (\(orderedTaps.count) taps, output \(outputUID), failure \(String(describing: aggregateFailure))) — \(config.mixes.count) mixes offline", level: .error)
                 routerTapSig = nil
+                _ = closeRouter() // Failure retains the partially built router for retry.
                 builtOK = false
                 failureStatus = RouterStatus(failedMixIDs: config.mixes.map(\.id), cause: .buildFailed)
                 return
@@ -701,6 +852,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
             routerTapSig = aggSig
             appliedDeviceIDs = currentDeviceIDs
             routerHealthBaseline = RouterHealthBaseline(
+                generation: routerGeneration,
                 outputUID: outputUID,
                 outputSampleRate: Self.deviceSampleRate(uid: outputUID),
                 sourceFormats: Dictionary(uniqueKeysWithValues: orderedTaps.map {
@@ -770,8 +922,8 @@ public actor CoreAudioEngine: AudioEngineProtocol {
             state.noInputSamples = 0
         }
 
-        if state.staleSamples >= 3 || state.noInputSamples >= 3 {
-            bamLog("router health failed: fires=\(h.fires) inBufs=\(h.inputBuffers) inCh=\(h.inputChannels) inFrames=\(h.inputFrames) outBufs=\(h.outputBuffers) outCh=\(h.outputChannels) outFrames=\(h.outputFrames); rebuilding aggregate", level: .error)
+        if Self.aggregateRecoveryRequired(snapshot: h, state: state) {
+            bamLog("router health failed: fires=\(h.fires) inBufs=\(h.inputBuffers) inCh=\(h.inputChannels) inFrames=\(h.inputFrames) outBufs=\(h.outputBuffers) outCh=\(h.outputChannels) outFrames=\(h.outputFrames) limiterFailures=\(h.limiterFailures); rebuilding aggregate", level: .error)
             recoverRouterAfterHealthFailure(signature: signature, reason: .aggregateStalled)
             return false
         }
@@ -846,6 +998,13 @@ public actor CoreAudioEngine: AudioEngineProtocol {
             state.healthyStreak = 0
         }
         return true
+    }
+
+    /// Native render errors can silence output while callbacks and input continue advancing.
+    /// Reuse the aggregate recovery budget, protected teardown and generation-bound rearm.
+    nonisolated static func aggregateRecoveryRequired(snapshot: RouterAggregate.HealthSnapshot,
+                                                       state: RouterHealthState) -> Bool {
+        snapshot.limiterFailures > 0 || state.staleSamples >= 3 || state.noInputSamples >= 3
     }
 
     private func outputFormatDrifted() -> Bool {
@@ -932,9 +1091,8 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         let restored = performGuardedOutputRebuild(uids: resolvedRouterOutputUIDs(config: config), unmute: !config.masterMuted) {
             routerGeneration += 1
             recoveryTestHooks?.willTearDown()
+            guard closeRouter() else { return false }
             for sourceID in resetSourceIDs { liveTaps[sourceID] = nil }
-            router = nil
-            routerTapSig = nil
             routerHealthBaseline = nil
             guard case .attempting = event else { return false }
             bamLog("router recovery: \(reason.rawValue)")
@@ -1131,6 +1289,19 @@ public actor CoreAudioEngine: AudioEngineProtocol {
 
     public func stopRouterChecked() async -> Bool { stopRouterUnderProtection() }
 
+    private func closeRouter() -> Bool {
+        // Once close is attempted, this generation must never take the reuse
+        // path even if only some HAL teardown stages succeeded.
+        routerTapSig = nil
+        guard router?.close() ?? true else { return false }
+        if var snapshot = router?.audioDiagnostics() {
+            snapshot.generation = diagnosticsGeneration
+            lastAudioDiagnostics = snapshot
+        }
+        router = nil
+        return true
+    }
+
     private func stopRouterUnderProtection() -> Bool {
         lastHealthyObservation = nil
         // Stopping destroys the aggregate too; leave protection restoration to the caller.
@@ -1147,7 +1318,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         routerSamplerTask = nil
         for t in rearmTasks.values { t.cancel() }
         rearmTasks.removeAll()
-        router = nil          // deinit tears down the aggregate → un-mutes apps
+        guard closeRouter() else { return false }
         liveTaps.removeAll()
         routerConfig = nil
         routerTapSig = nil

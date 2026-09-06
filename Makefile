@@ -28,10 +28,12 @@ build: generate
 
 ## test: BamKit unit tests + app/recovery test suite
 test: generate
-	swift test --package-path BamKit
+	swift test --package-path BamKit --force-resolved-versions
+	python3 -B scripts/analyze-audio-latency.py --self-test
+	python3 -B scripts/tests/test_collect_audio_diagnostics.py
 	xcodebuild -project bam.xcodeproj -scheme $(SCHEME) \
 		-configuration Debug -derivedDataPath $(DERIVED_DEV) \
-		CODE_SIGNING_ALLOWED=NO test
+		CODE_SIGNING_ALLOWED=NO -onlyUsePackageVersionsFromResolvedFile test
 
 ## install: release build → /Applications, lowering volume before relaunch
 install: generate
