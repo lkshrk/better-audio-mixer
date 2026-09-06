@@ -132,6 +132,7 @@ func consoleDb(_ level: Double) -> String {
 /// LED-segment level meter. Vertical by default; horizontal for compact rows.
 struct Meter: View {
     @Environment(\.theme) private var t
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let level: Float
     var active: Bool = true
     var width: CGFloat = 7
@@ -152,7 +153,6 @@ struct Meter: View {
         }
         .padding(1.5)
         .frame(width: horizontal ? height : width, height: horizontal ? width : height)
-        .animation(.linear(duration: 0.12), value: active)
     }
 
     @ViewBuilder private func cells(_ lit: Int, reversed: Bool = false) -> some View {
@@ -164,6 +164,9 @@ struct Meter: View {
             RoundedRectangle(cornerRadius: 1.5)
                 .fill(c)
                 .opacity(idx < lit ? 1 : 0.12)
+                // Fast peaks, gentle release: avoid hard flicker at segment boundaries.
+                .animation(reduceMotion || !active ? nil : .easeOut(duration: idx < lit ? 0.04 : 0.22),
+                           value: idx < lit)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
