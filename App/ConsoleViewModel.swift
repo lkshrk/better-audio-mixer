@@ -261,11 +261,15 @@ final class ConsoleViewModel {
     /// so the Default mix points at the right device across restarts.
     private func startRouterReconciling() async {
         let generation = routerWorkGeneration
+        let requestedDestination = config.mixes.first { $0.id == Self.defaultMixID }?.dest
         let status = await startRouterGuarded(config: config)
         guard generation == routerWorkGeneration, !Task.isCancelled, driverEnabled else { return }
         applyRouterStatus(status)
-        guard let bound = await engine.boundOutputUID(),
-              let i = config.mixes.firstIndex(where: { $0.id == Self.defaultMixID })
+        guard !status.isFailure,
+              let bound = await engine.boundOutputUID(),
+              generation == routerWorkGeneration, !Task.isCancelled, driverEnabled,
+              let i = config.mixes.firstIndex(where: { $0.id == Self.defaultMixID }),
+              config.mixes[i].dest == requestedDestination
         else { return }
         let current: String? = {
             if case .hardware(let u) = config.mixes[i].dest { return u } else { return nil }
@@ -585,8 +589,8 @@ final class ConsoleViewModel {
 
     static func seedConfig() -> BamConfig { BamConfig() }
 
-    /// Guarantee a Default catch-all device exists, first in the list, sending the
-    /// `.rest` remainder to the system default hardware output.
+    /// Guarantee a Default catch-all mix exists first. Seed an unset hardware
+    /// choice from macOS once; preserve the user's BAM output on later starts.
     static func normalize(_ cfg: BamConfig, defaultOutput: String?) -> BamConfig {
         var c = cfg
         if !c.sources.contains(where: { $0.kind == .rest }) {
@@ -596,7 +600,7 @@ final class ConsoleViewModel {
         let dest: MixDestination = defaultOutput.map { .hardware(uid: $0) } ?? .virtualSlot(0)
         if let di = c.mixes.firstIndex(where: { $0.id == defaultMixID }) {
             c.mixes[di].name = "Default"
-            c.mixes[di].dest = dest
+            if case .virtualSlot = c.mixes[di].dest { c.mixes[di].dest = dest }
             if !c.mixes[di].sends.contains(where: { $0.source == restID }) {
                 // Tapped (so the app's own output is muted) but not passed through:
                 // ungrouped audio is silenced until the user assigns it to a device.

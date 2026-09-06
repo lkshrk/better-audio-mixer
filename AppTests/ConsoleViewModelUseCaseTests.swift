@@ -37,6 +37,27 @@ final class ConsoleViewModelUseCaseTests: XCTestCase {
 
     // MARK: launch fader seed
 
+    func testNormalizationPreservesChosenOutputAcrossDefaultChangesAndDisconnection() {
+        let config = BamConfig(mixes: [Mix(id: ConsoleViewModel.defaultMixID,
+                                          name: "Default", dest: .hardware(uid: "ChosenOutput"))])
+        for defaultOutput in ["CaptureA", "CaptureB", nil] {
+            let normalized = ConsoleViewModel.normalize(config, defaultOutput: defaultOutput)
+            XCTAssertEqual(ConsoleViewModel.hardwareOutputUID(in: normalized), "ChosenOutput")
+        }
+    }
+
+    func testNormalizationSeedsOutputOnlyUntilFirstSelection() {
+        let seeded = ConsoleViewModel.normalize(BamConfig(), defaultOutput: "FirstDefault")
+        XCTAssertEqual(ConsoleViewModel.hardwareOutputUID(in: seeded), "FirstDefault")
+        let reloaded = ConsoleViewModel.normalize(seeded, defaultOutput: "NewDefault")
+        XCTAssertEqual(ConsoleViewModel.hardwareOutputUID(in: reloaded), "FirstDefault")
+
+        let unavailable = ConsoleViewModel.normalize(BamConfig(), defaultOutput: nil)
+        XCTAssertNil(ConsoleViewModel.hardwareOutputUID(in: unavailable))
+        let connected = ConsoleViewModel.normalize(unavailable, defaultOutput: "NewDefault")
+        XCTAssertEqual(ConsoleViewModel.hardwareOutputUID(in: connected), "NewDefault")
+    }
+
     func testInitSeedsOutputVolumeFromSavedValue() {
         let model = makeModel(engine: MockAudioEngine(), driver: false, saved: 0.55)
         XCTAssertEqual(model.outputVolume, 0.55, accuracy: 0.0001,

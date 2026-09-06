@@ -8,7 +8,7 @@
   "Category": "Better Audio Mixer",
   "CategoryIcon": "icons/category",
   "Icon": "icons/pluginIcon",
-  "Version": "1.0.6.0",
+  "Version": "1.0.7.0",
   "CodePath": "bin/BAMStreamDeck",
   "Software": {
     "MinimumVersion": "6.9"

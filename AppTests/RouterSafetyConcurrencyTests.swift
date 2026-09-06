@@ -35,6 +35,36 @@ final class RouterSafetyConcurrencyTests: XCTestCase {
         return model
     }
 
+    func testFailedStartupPreservesSelectedOutputDespiteOldBoundOutput() async {
+        let mock = MockAudioEngine()
+        await mock.setCheckedWriteResults(mute: .failed)
+        let model = ConsoleViewModel(engine: mock, defaults: defaults)
+        let config = BamConfig(mixes: [Mix(id: ConsoleViewModel.defaultMixID,
+                                          name: "Default", dest: .hardware(uid: "ChosenOutput"))])
+        await model.startMock(config: config)
+
+        XCTAssertEqual(model.routerStatus.cause, .buildFailed)
+        let bound = await mock.boundOutputUID()
+        XCTAssertEqual(bound, "MockOutput", "failed protection leaves an older binding")
+        XCTAssertEqual(model.systemOutputUID, "ChosenOutput")
+        await model.stop()
+    }
+
+    func testFailedSwitchAndReconciliationPreserveNewSelection() async {
+        let mock = MockAudioEngine()
+        let model = await makeModel(mock)
+        await mock.setCheckedWriteResults(mute: .failed)
+        model.setSystemOutput("ChosenOutput")
+        await model.enqueueRouterWork { _ in }.value
+        await model.restartAudio()
+
+        XCTAssertEqual(model.routerStatus.cause, .buildFailed)
+        let bound = await mock.boundOutputUID()
+        XCTAssertEqual(bound, "MockOutput")
+        XCTAssertEqual(model.systemOutputUID, "ChosenOutput")
+        await model.stop()
+    }
+
     func testUserMuteAndVolumeDuringFadeReplaceOriginalTarget() async {
         let mock = MockAudioEngine()
         let model = await makeModel(mock)

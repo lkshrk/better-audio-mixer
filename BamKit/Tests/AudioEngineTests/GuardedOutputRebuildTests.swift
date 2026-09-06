@@ -3,6 +3,54 @@ import BamCore
 @testable import AudioEngine
 
 final class GuardedOutputRebuildTests: XCTestCase {
+    func testSeparateCaptureDeviceNeedsNoHardwareControls() async {
+        let calls = MuteCallRecorder()
+        let rebuilt = BoolFlag()
+        await CoreAudioEngine.setDeviceOpsForTests((
+            volume: { uid in uid == "listening" ? 0.4 : nil },
+            muted: { _ in false },
+            setVolume: { uid, _ in uid == "listening" ? .applied : .unsupported },
+            setMuted: { uid, muted in
+                calls.record(uid: uid, muted: muted, rebuildFiredBeforeThis: rebuilt.value)
+                return uid == "listening" ? .applied : .unsupported
+            }
+        ))
+        // Capture can be any separately selected device, including one without
+        // mute/volume controls. It is not a listening-output protection owner.
+        let uids = CoreAudioEngine.listeningOutputUIDs(selected: "listening", bound: "listening", pending: [])
+        XCTAssertEqual(uids, ["listening"])
+        let engine = CoreAudioEngine()
+        await engine.performGuardedOutputRebuildForTests(uids: uids, unmute: true) {
+            rebuilt.set(true)
+            return true
+        }
+        XCTAssertTrue(rebuilt.value)
+        XCTAssertEqual(calls.all().map(\.uid), ["listening", "listening"])
+        XCTAssertEqual(calls.all().map(\.muted), [true, false])
+    }
+
+    func testPreviousAndUnrestoredListeningOutputsKeepProtection() {
+        XCTAssertEqual(CoreAudioEngine.listeningOutputUIDs(selected: "new", bound: "old", pending: ["failed"]),
+                       ["new", "old", "failed"])
+        XCTAssertEqual(CoreAudioEngine.listeningOutputUIDs(selected: nil, bound: "old", pending: []), ["old"])
+        XCTAssertEqual(CoreAudioEngine.listeningOutputUIDs(selected: nil, bound: nil, pending: []), [])
+    }
+
+    func testMissingListeningOutputCannotAuthorizeLiveTeardown() async {
+        let engine = CoreAudioEngine()
+        await engine.installRouterForTests(resources: RouterAggregate.IOResources())
+        await engine.configureRecoveryForTests(config: BamConfig(), hooks: .init(
+            outputUIDs: [], willTearDown: {}, rebuild: { .ok }))
+        let status = await engine.startRouter(config: BamConfig())
+        XCTAssertEqual(status.cause, .noOutput)
+        let retainedAfterStart = await engine.hasRouterForTests()
+        XCTAssertTrue(retainedAfterStart)
+        let stopped = await engine.stopRouterChecked()
+        XCTAssertFalse(stopped)
+        let retainedAfterStop = await engine.hasRouterForTests()
+        XCTAssertTrue(retainedAfterStop)
+    }
+
     override func tearDown() async throws {
         await CoreAudioEngine.setDeviceOpsForTests(nil)
         await CoreAudioEngine.setChangeListenerFactoryForTests(nil)

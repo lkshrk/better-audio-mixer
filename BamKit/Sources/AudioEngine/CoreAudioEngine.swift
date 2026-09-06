@@ -225,29 +225,30 @@ public actor CoreAudioEngine: AudioEngineProtocol {
     /// Re-bind a stored output UID to a currently-present device. Exact UID wins.
     /// On miss, fall back to the single live device that shares the stored UID's
     /// stable anchor (USB re-enumeration drifts the trailing instance index but
-    /// keeps the serial-bearing prefix); 0 or >1 matches → system default output.
+    /// keeps the serial-bearing prefix). Missing or ambiguous selections stay
+    /// unavailable; only an initial, unset selection can use the system default.
     static func resolveOutputUID(stored: String?) -> String? {
-        let live = ProcessEnumerator.systemOutputDevices()
-        if let stored, live.contains(where: { $0.uid == stored }) { return stored }
-        if let stored {
-            let key = stableOutputKey(stored)
-            let matches = live.filter { stableOutputKey($0.uid) == key }
-            if matches.count == 1 { return matches[0].uid }
-        }
-        return ProcessEnumerator.defaultOutputDeviceUID()
+        resolveOutputUID(stored: stored,
+                         liveUIDs: ProcessEnumerator.systemOutputDevices().map(\.uid),
+                         defaultUID: stored == nil ? ProcessEnumerator.defaultOutputDeviceUID() : nil)
     }
 
-    /// Process taps must follow where apps are actually emitting audio, not where
-    /// bam will render the mixed output. If the user picks speakers in bam while
-    /// Brave is still playing to the macOS default Razer device, binding the tap
-    /// to speakers captures nothing and the raw audio keeps playing on Razer.
-    static func tapCaptureOutputUID(targetOutputUID: String, defaultOutputUID: String?) -> String {
-        defaultOutputUID ?? targetOutputUID
+    static func resolveOutputUID(stored: String?, liveUIDs: [String], defaultUID: String?) -> String? {
+        guard let stored else { return defaultUID }
+        if liveUIDs.contains(stored) { return stored }
+        let key = stableOutputKey(stored)
+        let matches = liveUIDs.filter { stableOutputKey($0) == key }
+        return matches.count == 1 ? matches[0] : nil
     }
 
-    private static func tapCaptureOutputUID(targetOutputUID: String) -> String {
-        tapCaptureOutputUID(targetOutputUID: targetOutputUID,
-                            defaultOutputUID: ProcessEnumerator.defaultOutputDeviceUID())
+    /// Capture follows macOS routing independently of BAM's listening output.
+    /// An absent system output must not turn the listening device into a fallback.
+    static func tapCaptureOutputUID(defaultOutputUID: String?) -> String? {
+        defaultOutputUID
+    }
+
+    private static func tapCaptureOutputUID() -> String? {
+        tapCaptureOutputUID(defaultOutputUID: ProcessEnumerator.defaultOutputDeviceUID())
     }
 
     /// Stable portion of a device UID across re-enumeration. Apple USB engine UIDs
@@ -624,16 +625,18 @@ public actor CoreAudioEngine: AudioEngineProtocol {
 
     private func resolvedRouterOutputUIDs(config: BamConfig) -> Set<String> {
         if let recoveryTestHooks { return recoveryTestHooks.outputUIDs }
-        var uids = Set(appliedDeviceIDs.keys.filter { ProcessEnumerator.deviceID(forUID: $0) != nil })
-        if let previous = _boundOutputUID, ProcessEnumerator.deviceID(forUID: previous) != nil { uids.insert(previous) }
         let stored = config.mixes.compactMap { mix -> String? in
             if case .hardware(let uid) = mix.dest { return uid }; return nil
         }.first
-        if let output = Self.resolveOutputUID(stored: stored) {
-            uids.insert(output)
-            uids.insert(Self.tapCaptureOutputUID(targetOutputUID: output))
-        }
-        return uids
+        let uids = Self.listeningOutputUIDs(selected: Self.resolveOutputUID(stored: stored),
+                                           bound: _boundOutputUID, pending: Set(recoveryOutputIntent.keys))
+        return Set(uids.filter { ProcessEnumerator.deviceID(forUID: $0) != nil })
+    }
+
+    /// Capture identities participate in topology validation, never hardware
+    /// protection unless that device is also a current/previous BAM output.
+    nonisolated static func listeningOutputUIDs(selected: String?, bound: String?, pending: Set<String>) -> Set<String> {
+        pending.union([selected, bound].compactMap { $0 })
     }
 
     struct DesiredTapSpec: Equatable {
@@ -692,7 +695,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
             if case .hardware(let uid) = mix.dest { return uid }; return nil
         }.first
         guard let output = Self.resolveOutputUID(stored: stored), output == _boundOutputUID else { return false }
-        let capture = Self.tapCaptureOutputUID(targetOutputUID: output)
+        guard let capture = Self.tapCaptureOutputUID() else { return false }
         let ids = Set([output, capture])
         guard ids == Set(appliedDeviceIDs.keys), ids.allSatisfy({ uid in
             guard let id = ProcessEnumerator.deviceID(forUID: uid), id == appliedDeviceIDs[uid] else { return false }
@@ -748,15 +751,20 @@ public actor CoreAudioEngine: AudioEngineProtocol {
     /// Returns mix ids that could not be brought online (empty on success).
     public func startRouter(config: BamConfig) -> RouterStatus {
         let requiredOutputs = resolvedRouterOutputUIDs(config: config)
-        guard !requiredOutputs.isEmpty, requiredOutputs.isSubset(of: protectedOutputUIDs) else {
+        guard !requiredOutputs.isEmpty else {
+            // A missing lookup is not proof that an existing renderer is gone.
+            // Keep its ownership until a listening output can be protected.
+            return RouterStatus(failedMixIDs: config.mixes.map(\.id), cause: .noOutput)
+        }
+        guard requiredOutputs.isSubset(of: protectedOutputUIDs) else {
             return RouterStatus(failedMixIDs: config.mixes.map(\.id), cause: .buildFailed)
         }
         let signpostID = engineSignposter.makeSignpostID()
         let signpostState = engineSignposter.beginInterval("CoreAudioEngine.startRouter", id: signpostID)
         defer { engineSignposter.endInterval("CoreAudioEngine.startRouter", signpostState) }
 
-        // The single output everything mixes into: the hardware dest the picker
-        // drives (the Default device), else the system default output. Resolve the
+        // The single output everything mixes into is the user's saved BAM choice.
+        // The system default only seeds a missing initial selection. Resolve the
         // stored UID against the live device list first — USB devices (e.g. the
         // Razer wireless dongle) re-enumerate with a new trailing instance index,
         // so the persisted UID can go stale while the device is still present.
@@ -777,13 +785,17 @@ public actor CoreAudioEngine: AudioEngineProtocol {
                 "startRouter: stored output absent stored=\(storedUID, privacy: .private) rebound=\(outputUID, privacy: .private)"
             )
         }
-        let captureUID = Self.tapCaptureOutputUID(targetOutputUID: outputUID)
-        let currentUIDs = requiredOutputs.union([outputUID, captureUID])
-        guard currentUIDs.isSubset(of: protectedOutputUIDs),
-              currentUIDs.allSatisfy({ Self.resolvedDeviceMuted(uid: $0) }) else {
+        guard let captureUID = Self.tapCaptureOutputUID() else {
+            guard closeRouter() else {
+                return RouterStatus(failedMixIDs: config.mixes.map(\.id), cause: .buildFailed)
+            }
+            return RouterStatus(failedMixIDs: config.mixes.map(\.id), cause: .noOutput)
+        }
+        let listeningUIDs = requiredOutputs.union([outputUID])
+        guard listeningUIDs.isSubset(of: protectedOutputUIDs),
+              listeningUIDs.allSatisfy({ Self.resolvedDeviceMuted(uid: $0) }) else {
             return RouterStatus(failedMixIDs: config.mixes.map(\.id), cause: .buildFailed)
         }
-        _boundOutputUID = outputUID
         let currentDeviceIDs = Dictionary(uniqueKeysWithValues: Set([outputUID, captureUID]).compactMap { uid in
             ProcessEnumerator.deviceID(forUID: uid).map { (uid, $0) }
         })
@@ -874,6 +886,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
             }
             liveTaps = newLive
             routerMembershipUncertain = false
+            _boundOutputUID = outputUID
             routerHealthBaseline = nil
             routerHealthTask?.cancel()
             routerHealthTask = nil
@@ -936,6 +949,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
             routerMembershipUncertain = false
             router = agg
             routerTapSig = aggSig
+            _boundOutputUID = outputUID
             appliedDeviceIDs = currentDeviceIDs
             routerHealthBaseline = RouterHealthBaseline(
                 generation: routerGeneration,
@@ -1393,7 +1407,9 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         // Stopping destroys the aggregate too; leave protection restoration to the caller.
         if router != nil || !liveTaps.isEmpty {
             guard let config = routerConfig else { return false }
-            for uid in resolvedRouterOutputUIDs(config: config) {
+            let outputs = resolvedRouterOutputUIDs(config: config)
+            guard !outputs.isEmpty else { return false }
+            for uid in outputs {
                 guard writeOutputMute(uid: uid, true) == .applied else { return false }
             }
         }

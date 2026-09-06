@@ -39,15 +39,12 @@ final class AudioDSPTests: XCTestCase {
         XCTAssertEqual(rms(right), rms(input), accuracy: 1e-5)
     }
 
-    func testTapCaptureFollowsMacOSDefaultNotBamRenderTarget() {
+    func testTapCaptureRequiresMacOSDefaultInsteadOfFallingBackToBam() {
         XCTAssertEqual(
-            CoreAudioEngine.tapCaptureOutputUID(targetOutputUID: "Speakers", defaultOutputUID: "Razer"),
-            "Razer"
+            CoreAudioEngine.tapCaptureOutputUID(defaultOutputUID: "system-output"),
+            "system-output"
         )
-        XCTAssertEqual(
-            CoreAudioEngine.tapCaptureOutputUID(targetOutputUID: "Speakers", defaultOutputUID: nil),
-            "Speakers"
-        )
+        XCTAssertNil(CoreAudioEngine.tapCaptureOutputUID(defaultOutputUID: nil))
     }
 
     func testMixIDsReferencingFailedTapSourcesOnlyMarksAffectedMixes() {
