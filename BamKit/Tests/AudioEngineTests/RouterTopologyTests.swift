@@ -36,6 +36,49 @@ final class RouterTopologyTests: XCTestCase {
         XCTAssertFalse(result)
     }
 
+    func testConfiguredSourceSlotSurvivesExitAndFirstLaunch() {
+        let idle = CoreAudioEngine.desiredTapSpecs(config: config, processes: [], captureUID: "out", selfObjectID: 9)
+        let active = CoreAudioEngine.desiredTapSpecs(config: config, processes: [process(1, "example.app")], captureUID: "out", selfObjectID: 9)
+        XCTAssertEqual(idle.map(\.sourceID), ["app", "rest"])
+        XCTAssertEqual(idle.first?.processIDs, [])
+        XCTAssertEqual(idle.last?.processIDs, [9])
+        XCTAssertEqual(idle.map(\.structuralSignature), active.map(\.structuralSignature))
+        XCTAssertNotEqual(idle.map(\.sig), active.map(\.sig), "membership changes still require protection")
+    }
+
+    func testMembershipUpdatePlanKeepsSourceSlotsAndRejectsStructuralChanges() {
+        let before = CoreAudioEngine.desiredTapSpecs(config: config, processes: [process(1, "example.app")], captureUID: "out", selfObjectID: 9)
+        let after = CoreAudioEngine.desiredTapSpecs(config: config, processes: [process(2, "example.app.helper")], captureUID: "out", selfObjectID: 9)
+        let live = Dictionary(uniqueKeysWithValues: before.map { ($0.sourceID, $0) })
+        XCTAssertEqual(CoreAudioEngine.membershipUpdates(desired: before, live: live), [])
+        XCTAssertEqual(CoreAudioEngine.membershipUpdates(desired: after, live: live)?.map(\.sourceID), ["app", "rest"])
+        XCTAssertNil(CoreAudioEngine.membershipUpdates(desired: Array(after.dropFirst()), live: live))
+        let switched = CoreAudioEngine.desiredTapSpecs(config: config, processes: [], captureUID: "other", selfObjectID: 9)
+        XCTAssertNil(CoreAudioEngine.membershipUpdates(desired: switched, live: live))
+    }
+
+    func testTapUpdatePreservesCaptureAndMuteContract() {
+        let before = CATapDescription(processes: [1], deviceUID: "output", stream: 0)
+        before.isPrivate = true
+        before.muteBehavior = .mutedWhenTapped
+        let after = CATapDescription(processes: [], deviceUID: "output", stream: 0)
+        after.uuid = before.uuid
+        after.isPrivate = true
+        after.muteBehavior = .mutedWhenTapped
+        XCTAssertTrue(ProcessTap.sameConfiguration(before, after))
+        after.muteBehavior = .unmuted
+        XCTAssertFalse(ProcessTap.sameConfiguration(before, after))
+        after.muteBehavior = before.muteBehavior
+        after.isExclusive = true
+        XCTAssertFalse(ProcessTap.sameConfiguration(before, after))
+        after.isExclusive = false
+        after.deviceUID = "different-output"
+        XCTAssertFalse(ProcessTap.sameConfiguration(before, after))
+        after.deviceUID = before.deviceUID
+        after.uuid = UUID()
+        XCTAssertFalse(ProcessTap.sameConfiguration(before, after))
+    }
+
     func testProductionEligibilityDefersUnknownHealthButRejectsChangedTopology() {
         let now = ContinuousClock.now
         let formats = ["app": CoreAudioEngine.SourceFormat(sampleRate: 48_000, channels: 2)]

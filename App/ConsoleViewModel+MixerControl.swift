@@ -54,11 +54,11 @@ extension ConsoleViewModel: MixerControl {
     }
 
     func setMasterPos(pos: Double) {
-        setOutputVolume(pos)
+        setOutputVolume(pos, origin: "control:setMasterPos")
     }
 
     func nudgeMasterPos(delta: Double) {
-        setOutputVolume(outputVolume + delta)
+        setOutputVolume(outputVolume + delta, origin: "control:nudgeMasterPos")
     }
 
     func setMasterMuted(muted: Bool) {

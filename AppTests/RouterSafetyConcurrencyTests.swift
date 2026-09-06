@@ -86,6 +86,28 @@ final class RouterSafetyConcurrencyTests: XCTestCase {
         await model.stop()
     }
 
+    func testFailedLiveVolumeChangeMutesAndSurfacesFailure() async {
+        let mock = MockAudioEngine()
+        let model = await makeModel(mock)
+        await mock.setCheckedWriteResults(volume: .failed)
+        model.setOutputVolume(1)
+        await model.enqueueRouterWork { _ in }.value
+        let muted = await mock.outputMuted(uid: "MockOutput")
+        XCTAssertTrue(muted)
+        XCTAssertNotNil(model.error)
+        XCTAssertEqual(model.routerStatus.cause, .buildFailed)
+        XCTAssertNotNil(model.guardedOutputs["MockOutput"])
+
+        await mock.resetCalls()
+        model.setOutputVolume(0)
+        await model.enqueueRouterWork { _ in }.value
+        let calls = await mock.calls
+        XCTAssertFalse(calls.contains(.setOutputMuted(uid: "MockOutput", muted: false)))
+        XCTAssertFalse(calls.contains(.setOutputVolume(uid: "MockOutput", volume: 0)))
+        XCTAssertEqual(model.guardedOutputs["MockOutput"]?.volume, 0)
+        await model.stop()
+    }
+
     func testAlternatingGainAndHardwareTargetsStayBounded() async {
         let mock = MockAudioEngine()
         let model = await makeModel(mock)

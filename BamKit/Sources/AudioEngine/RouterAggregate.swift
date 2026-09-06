@@ -7,8 +7,8 @@ import Foundation
 /// Single hardware-clocked aggregate that captures every source tap together
 /// with the selected output device, summing each tap × its live gain into the
 /// output inside one IOProc. One clock domain (the output device drives the
-/// aggregate), without an application-level capture/playback queue. The taps are `.mutedWhenTapped`, so each captured app's own output is
-/// silenced and only bam's summed mix reaches the hardware.
+/// aggregate), without an application-level capture/playback queue. Tap capture
+/// readiness does not itself prove suppression of an app's original output.
 final class RouterAggregate {
     enum BuildFailure: Equatable {
         case createAggregate(OSStatus)
@@ -48,6 +48,7 @@ final class RouterAggregate {
         let sourceID: String
         let proc: ProcessTap
         let channels: Int
+        let format: AudioStreamBasicDescription
         let gains = AtomicStereoGain()
         let meter = AtomicFloat(RMSMeter.floorDB)
         let meterL = AtomicFloat(RMSMeter.floorDB)
@@ -59,11 +60,133 @@ final class RouterAggregate {
             self.sourceID = sourceID
             self.proc = proc
             self.channels = max(1, Int(proc.format.mChannelsPerFrame))
+            self.format = proc.format
         }
     }
 
     private let taps: [Tap]
     private let tapIndexByID: [String: Int]
+    /// One writer (IOProc), atomic snapshots on the control thread. Tokens refer
+    /// to callback starts, so an already-running callback cannot confirm an edit.
+    final class CaptureReadiness {
+        private let started = ManagedAtomic<UInt64>(0)
+        private let completed = ManagedAtomic<UInt64>(0)
+        var token: UInt64 { started.load(ordering: .acquiring) }
+        func beginCallback() -> UInt64 {
+            started.wrappingIncrementThenLoad(ordering: .releasing)
+        }
+        func completeCallback(_ sequence: UInt64, valid: Bool) {
+            completed.store(valid ? sequence : 0, ordering: .releasing)
+        }
+        func wait(after token: UInt64, timeout: TimeInterval) -> Bool {
+            guard timeout.isFinite, timeout >= 0 else { return false }
+            let deadline = ContinuousClock.now.advanced(by: .seconds(timeout))
+            repeat {
+                if completed.load(ordering: .acquiring) > token { return true }
+                if ContinuousClock.now >= deadline { return false }
+                Thread.sleep(forTimeInterval: min(0.001, timeout))
+            } while true
+        }
+    }
+    private let readiness = CaptureReadiness()
+    var readinessToken: UInt64 { readiness.token }
+
+    /// Call on the control thread after applying gains/membership changes.
+    /// This confirms render progress, not acoustic continuity or source mute.
+    func waitUntilReady(after token: UInt64 = 0, timeout: TimeInterval = 0.5) -> Bool {
+        readiness.wait(after: token, timeout: timeout)
+    }
+
+    func hasCompatibleTapFormats() -> Bool {
+        taps.allSatisfy { tap in
+            guard let current = tap.proc.currentFormat() else { return false }
+            let frozen = tap.format
+            return Self.supportsFormat(current)
+                && current.mSampleRate == frozen.mSampleRate
+                && current.mFormatFlags == frozen.mFormatFlags
+                && current.mChannelsPerFrame == frozen.mChannelsPerFrame
+                && current.mBytesPerFrame == frozen.mBytesPerFrame
+                && current.mBytesPerPacket == frozen.mBytesPerPacket
+                && current.mFramesPerPacket == frozen.mFramesPerPacket
+        }
+    }
+
+    /// Null input slots represent inactive sources and retain channel positions.
+    /// Actual sample values (including silence) are irrelevant to readiness.
+    static func hasValidInputLayout(_ buffers: UnsafeMutableAudioBufferListPointer, channels: Int) -> Bool {
+        var total = 0
+        for buffer in buffers {
+            let count = Int(buffer.mNumberChannels)
+            guard count > 0, Int(buffer.mDataByteSize) % (MemoryLayout<Float>.size * count) == 0 else { return false }
+            total += count
+        }
+        return channels > 0 && total == channels
+    }
+
+    /// Built once on the control thread from the IOProc configuration and every
+    /// stream's virtual format. One mono ASBD cannot describe two mono streams.
+    struct OutputLayout {
+        let bufferChannels: [Int]
+        let sampleRate: Double
+
+        init?(bufferChannels: [Int], streamFormats: [AudioStreamBasicDescription]) {
+            guard bufferChannels == [1] || bufferChannels == [2] || bufferChannels == [1, 1],
+                  let first = streamFormats.first else { return nil }
+            var expected: [Int] = []
+            for format in streamFormats {
+                guard RouterAggregate.supportsFormat(format), format.mSampleRate == first.mSampleRate else { return nil }
+                if format.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0 {
+                    expected.append(contentsOf: repeatElement(1, count: Int(format.mChannelsPerFrame)))
+                } else {
+                    expected.append(Int(format.mChannelsPerFrame))
+                }
+            }
+            guard expected == bufferChannels else { return nil }
+            self.bufferChannels = bufferChannels
+            self.sampleRate = first.mSampleRate
+        }
+    }
+
+    private static func outputLayout(device: AudioObjectID) -> OutputLayout? {
+        var address = CA.address(kAudioDevicePropertyStreamConfiguration, kAudioDevicePropertyScopeOutput)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(device, &address, 0, nil, &size) == noErr,
+              size >= MemoryLayout<AudioBufferList>.size else { return nil }
+        let capacity = Int(size)
+        let memory = UnsafeMutableRawPointer.allocate(byteCount: capacity, alignment: MemoryLayout<AudioBufferList>.alignment)
+        defer { memory.deallocate() }
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, memory) == noErr,
+              Int(size) <= capacity, size >= MemoryLayout<AudioBufferList>.size else { return nil }
+        let list = memory.assumingMemoryBound(to: AudioBufferList.self)
+        let count = Int(list.pointee.mNumberBuffers)
+        guard (1...2).contains(count),
+              Int(size) >= MemoryLayout<AudioBufferList>.size + (count - 1) * MemoryLayout<AudioBuffer>.stride else { return nil }
+        let buffers = UnsafeMutableAudioBufferListPointer(list)
+        let streams = CA.array(device, CA.address(kAudioDevicePropertyStreams, kAudioDevicePropertyScopeOutput),
+                               of: AudioStreamID.self)
+        guard (1...2).contains(streams.count) else { return nil }
+        let formats = streams.map { stream in
+            CA.value(stream, CA.address(kAudioStreamPropertyVirtualFormat), default: AudioStreamBasicDescription())
+        }
+        return OutputLayout(bufferChannels: buffers.map { Int($0.mNumberChannels) }, streamFormats: formats)
+    }
+
+    static func validOutputFrames(_ buffers: UnsafeMutableAudioBufferListPointer,
+                                  layout: OutputLayout) -> Int? {
+        guard buffers.count == layout.bufferChannels.count else { return nil }
+        var frames: Int?
+        for index in buffers.indices {
+            let buffer = buffers[index]
+            let count = layout.bufferChannels[index]
+            let bytes = MemoryLayout<Float>.size * count
+            guard Int(buffer.mNumberChannels) == count, buffer.mData != nil,
+                  buffer.mDataByteSize > 0, Int(buffer.mDataByteSize) % bytes == 0 else { return nil }
+            let available = Int(buffer.mDataByteSize) / bytes
+            if let frames, frames != available { return nil }
+            frames = available
+        }
+        return frames
+    }
     /// Control-thread resource owner. Each successful close stage is committed
     /// separately; failed handles remain available for the next protected retry.
     final class IOResources {
@@ -147,8 +270,8 @@ final class RouterAggregate {
 
     /// Fade-in length in frames (~43 ms at 48 kHz). The summed output is ramped
     /// 0→1 over the first taps after the aggregate goes live so a freshly started
-    /// router can never step from silence to full level — a click/pop or, worse,
-    /// a transient blast. Pure ear-safety net on top of tap-mute continuity.
+    /// router reduces startup clicks in its own rendered path. This does not
+    /// protect against original audio bypassing that path.
     private static let fadeInFrames = 2048
 
     // RT→log diagnostics (written relaxed on the audio thread, read by a Task).
@@ -191,12 +314,13 @@ final class RouterAggregate {
     /// Only layouts the callback interprets intentionally; never reinterpret PCM integers.
     static func supportsFormat(_ format: AudioStreamBasicDescription) -> Bool {
         let channels = format.mChannelsPerFrame
+        guard channels == 1 || channels == 2 else { return false }
         let planar = format.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0
         let bytes = UInt32(MemoryLayout<Float>.size) * (planar ? 1 : channels)
         return format.mFormatID == kAudioFormatLinearPCM
             && format.mFormatFlags & kAudioFormatFlagIsFloat != 0
             && format.mFormatFlags & kAudioFormatFlagIsBigEndian == 0
-            && format.mBitsPerChannel == 32 && (channels == 1 || channels == 2)
+            && format.mBitsPerChannel == 32
             && format.mBytesPerFrame == bytes && format.mFramesPerPacket == 1
             && format.mBytesPerPacket == bytes
             && format.mSampleRate.isFinite && format.mSampleRate >= 8000 && format.mSampleRate <= 384000
@@ -276,11 +400,10 @@ final class RouterAggregate {
 
     private func startIO() -> Bool {
         let nTaps = taps.count
-        let outputFormat = CA.value(aggregateID,
-            CA.address(kAudioDevicePropertyStreamFormat, kAudioDevicePropertyScopeOutput),
-            default: AudioStreamBasicDescription())
-        guard Self.supportsFormat(outputFormat) else { buildFailure = .unsupportedFormat; return false }
-        let outSR = outputFormat.mSampleRate
+        guard let outputLayout = Self.outputLayout(device: aggregateID) else {
+            buildFailure = .unsupportedFormat; return false
+        }
+        let outSR = outputLayout.sampleRate
         guard let mixer = RouterInputMixer(channels: taps.map(\.channels), gains: taps.map(\.gains), sampleRate: outSR) else {
             buildFailure = .unsupportedFormat; return false
         }
@@ -313,11 +436,23 @@ final class RouterAggregate {
         let dOutFrames = self.dOutFrames, dOutPeak = self.dOutPeak
         let dLimiterHits = self.dLimiterHits
         let dLimiterFailures = self.dLimiterFailures
+        let readiness = self.readiness
 
         let block: AudioDeviceIOBlock = { _, inInputData, _, outOutputData, outputTime in
+            let sequence = readiness.beginCallback()
+            var valid = false
+            defer { readiness.completeCallback(sequence, valid: valid) }
             let callbackStart = mach_absolute_time()
             let inABL = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inInputData))
             let outABL = UnsafeMutableAudioBufferListPointer(outOutputData)
+            // Silence every supplied output even when its layout is rejected.
+            for buffer in outABL {
+                if let data = buffer.mData {
+                    memset(data, 0, Int(buffer.mDataByteSize))
+                }
+            }
+            guard Self.hasValidInputLayout(inABL, channels: mixer.channelCount),
+                  Self.validOutputFrames(outABL, layout: outputLayout) != nil else { return }
             guard outABL.count > 0 else { return }
             let firstOut = outABL[0]
             guard let firstOutData = firstOut.mData else { return }
@@ -336,17 +471,6 @@ final class RouterAggregate {
             let out = firstOutData.assumingMemoryBound(to: Float.self)
             let rightOut = rightOutData?.assumingMemoryBound(to: Float.self)
 
-            var oz = 0
-            while oz < outABL.count {
-                let b = outABL[oz]
-                if let data = b.mData {
-                    let n = Int(b.mDataByteSize) / MemoryLayout<Float>.size
-                    let p = data.assumingMemoryBound(to: Float.self)
-                    var z = 0
-                    while z < n { p[z] = 0; z += 1 }
-                }
-                oz += 1
-            }
             let nBufs = inABL.count
             let outputRight = planarStereo ? rightOut : (firstOutCh == 2 ? out + 1 : nil)
             let outputStride = planarStereo ? 1 : firstOutCh
@@ -392,6 +516,7 @@ final class RouterAggregate {
             }
             lifetime.played = min(fadeIn, playedNow + outFrames)
 
+            let failuresBefore = limiter.renderFailures
             if limiter.process(left: out, right: outputRight, stride: outputStride, frames: outFrames) {
                 dLimiterHits.wrappingIncrement(ordering: .relaxed)
                 diagnostics.interventions.store(CallbackDiagnostics.increment(diagnostics.interventions.load(ordering: .relaxed)), ordering: .relaxed)
@@ -431,6 +556,7 @@ final class RouterAggregate {
             dOutPeak.store(peak.bitPattern, ordering: .relaxed)
             diagnostics.record(start: callbackStart, end: mach_absolute_time(), frames: outFrames,
                 outputHostTime: outputTime.pointee.mFlags.contains(.hostTimeValid) ? outputTime.pointee.mHostTime : nil)
+            valid = limiter.renderFailures == failuresBefore
         }
 
         let cst = AudioDeviceCreateIOProcIDWithBlock(&ioProcID, aggregateID, nil, block)

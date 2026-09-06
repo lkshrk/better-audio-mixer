@@ -328,11 +328,8 @@ final class ActionRouter {
             switch (s["mode"] as? String) ?? "mute" {
             case "set":    sendToBAM?(["t": "cmd", "op": "setMasterPos", "pos": pos])
             case "adjust":
-                if let wrap = Self.wrapPos(pct: masterPct, step: step) {
-                    sendToBAM?(["t": "cmd", "op": "setMasterPos", "pos": wrap])
-                } else {
-                    sendToBAM?(["t": "cmd", "op": "nudgeMasterPos", "delta": step])
-                }
+                // Let BAM clamp its current volume; stale cached zero must never wrap to full volume.
+                sendToBAM?(["t": "cmd", "op": "nudgeMasterPos", "delta": step])
             default:       sendMasterMute()
             }
         case .output:

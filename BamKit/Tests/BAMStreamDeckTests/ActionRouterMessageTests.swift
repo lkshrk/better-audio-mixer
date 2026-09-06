@@ -158,6 +158,28 @@ struct ActionRouterMessageTests {
         #expect(sent.last?["delta"] as? Double == 0.05)
     }
 
+    @Test(arguments: [nil, 0, 12, 100] as [Int?], [-0.05, 0.05])
+    func masterAdjustAlwaysNudgesRegardlessOfCachedState(cachedPct: Int?, step: Double) {
+        let router = ActionRouter(elgato: RecordingElgato())
+        var sent: [[String: Any]] = []
+        router.sendToBAM = { sent.append($0) }
+        bind(router, action: masterAction, context: "masterKey", controller: "Keypad", settings: [
+            "mode": "adjust",
+            "step": step,
+        ])
+        if let cachedPct {
+            router.ingestBAMFrame(["t": "state", "master": ["pct": cachedPct]])
+        }
+
+        router.handleEvent("keyDown", ["context": "masterKey"])
+
+        #expect(sent.count == 1)
+        #expect(sent.last?["t"] as? String == "cmd")
+        #expect(sent.last?["op"] as? String == "nudgeMasterPos")
+        #expect(sent.last?["delta"] as? Double == step)
+        #expect(sent.last?["pos"] == nil)
+    }
+
     @Test func dialRotateEmitsSignedMasterNudge() {
         let elgato = RecordingElgato()
         let router = ActionRouter(elgato: elgato)

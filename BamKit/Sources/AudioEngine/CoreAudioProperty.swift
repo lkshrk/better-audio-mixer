@@ -2,6 +2,109 @@ import CoreAudio
 import Foundation
 
 enum CA {
+    static let hardwareWriteState = HardwareWriteState()
+
+    /// A timed-out accepted volume/release can still arrive after re-muting. HAL exposes
+    /// no request IDs or cancellation, so readback cannot clear that uncertainty.
+    final class HardwareWriteState: @unchecked Sendable {
+        private struct Device: Hashable { let uid: String; let id: AudioObjectID }
+        private let lock = NSLock()
+        private var uncertain = Set<Device>()
+
+        func perform(
+            uid: String, device: AudioObjectID, protectingMute: Bool,
+            onFailure: () -> Void = {},
+            confirm: (_ forceWrite: Bool, _ accepted: () -> Void) -> Bool
+        ) -> Bool {
+            // ponytail: serialize control writes across devices; use per-device locks
+            // only if control-thread contention becomes material. Listener is independent.
+            let result = lock.withLock {
+                let key = Device(uid: uid, id: device)
+                if uncertain.contains(key) {
+                    if protectingMute { _ = confirm(true, {}) }
+                    // Best-effort protection cannot cancel an older pending write.
+                    return false
+                }
+                var accepted = false
+                let confirmed = confirm(false, { accepted = true })
+                if !protectingMute && accepted && !confirmed { uncertain.insert(key) }
+                return confirmed
+            }
+            // A failed live volume control may start unmuted. Its protection must
+            // reenter this state after unlocking, never leave it merely latched.
+            if !result { onFailure() }
+            return result
+        }
+    }
+
+    /// HAL setters acknowledge a request, not its completion. The listener runs on a
+    /// global queue so a synchronous actor/termination caller cannot block delivery.
+    static func confirmedWrite(
+        _ object: AudioObjectID, _ addr: AudioObjectPropertyAddress,
+        isCurrent: () -> Bool, write: () -> Bool, matches: () -> Bool,
+        timeout: TimeInterval = 0.5, forceWrite: Bool = false
+    ) -> Bool {
+        confirmWrite(isCurrent: isCurrent, matches: matches, subscribe: { signal in
+            var address = addr
+            let queue = DispatchQueue.global(qos: .userInitiated)
+            let listener: AudioObjectPropertyListenerBlock = { _, _ in signal() }
+            guard AudioObjectAddPropertyListenerBlock(object, &address, queue, listener) == noErr else { return nil }
+            return { _ = AudioObjectRemovePropertyListenerBlock(object, &address, queue, listener) }
+        }, write: write, timeout: timeout, forceWrite: forceWrite)
+    }
+
+    /// Injectable observation boundary for deterministic tests; never infers completion
+    /// from a successful setter or a notification whose readback is still stale.
+    static func confirmWrite(
+        isCurrent: () -> Bool, matches: () -> Bool,
+        subscribe: (@escaping @Sendable () -> Void) -> (() -> Void)?,
+        write: () -> Bool, timeout: TimeInterval = 0.5, forceWrite: Bool = false,
+        wait: (DispatchSemaphore, DispatchTime) -> Bool = { $0.wait(timeout: $1) == .success }
+    ) -> Bool {
+        guard isCurrent() else { return false }
+        if !forceWrite && matches() { return isCurrent() }
+        let signal = DispatchSemaphore(value: 0)
+        guard let unsubscribe = subscribe({ signal.signal() }) else { return false }
+        defer { unsubscribe() }
+        guard isCurrent() else { return false }
+        // The state may have reached the target while the listener was installed.
+        if !forceWrite && matches() { return isCurrent() }
+        let deadline = DispatchTime.now() + timeout
+        // Discard notifications already observed before this request. HAL provides
+        // no request correlation; callers must serialize writes and retain uncertainty
+        // after timeout rather than treating a retry's notification as cancellation.
+        while signal.wait(timeout: .now()) == .success {
+            if DispatchTime.now() >= deadline { return false }
+        }
+        guard isCurrent(), write() else { return false }
+        while wait(signal, deadline) {
+            guard isCurrent() else { return false }
+            if matches() { return isCurrent() }
+            if DispatchTime.now() >= deadline { return false }
+        }
+        return false
+    }
+
+    static func volumeMatches(_ actual: Float?, target: Float) -> Bool {
+        guard let actual, actual.isFinite, (0...1).contains(actual), target.isFinite else { return false }
+        if actual == target { return true }
+        // Silence and unity are exact safety boundaries. Match each channel's
+        // requested calibration independently, including newly scaled calibrations.
+        guard target > 0, target < 1 else { return false }
+        // ponytail: measured 12% writes can read 12.1502%; cap rounding acceptance at
+        // 0.2 percentage points AND 2% relative. Coarser devices need calibration.
+        return abs(actual - target) <= min(0.002, target * 0.02)
+    }
+
+    static func uint32Value(_ object: AudioObjectID, _ addr: AudioObjectPropertyAddress) -> UInt32? {
+        var value: UInt32 = 0
+        var address = addr
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(object, &address, 0, nil, &size, &value) == noErr,
+              size == MemoryLayout<UInt32>.size else { return nil }
+        return value
+    }
+
     static func address(
         _ selector: AudioObjectPropertySelector,
         _ scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal,
@@ -78,7 +181,7 @@ enum CA {
         let st = withUnsafeMutablePointer(to: &v) {
             AudioObjectGetPropertyData(object, &a, 0, nil, &io, $0)
         }
-        return st == noErr ? v : nil
+        return st == noErr && io == MemoryLayout<Float64>.size ? v : nil
     }
 
     static func float32(_ object: AudioObjectID, _ addr: AudioObjectPropertyAddress) -> Float? {
@@ -88,7 +191,7 @@ enum CA {
         let st = withUnsafeMutablePointer(to: &v) {
             AudioObjectGetPropertyData(object, &a, 0, nil, &io, $0)
         }
-        return st == noErr ? v : nil
+        return st == noErr && io == MemoryLayout<Float32>.size ? v : nil
     }
 
     static func isSettable(_ object: AudioObjectID, _ addr: AudioObjectPropertyAddress) -> Bool {

@@ -6,7 +6,7 @@ import os
 
 private let kProtocolVersion = 1
 private let kAppName = "BAM"
-private let kBuildVersion = "1.0.1"
+private let kBuildVersion = "1.0.6"
 
 private enum ControlLog {
     static let logger = Logger(subsystem: "me.harke.bam", category: "control")
@@ -347,7 +347,7 @@ public final class ControlServer: @unchecked Sendable {
         }
         switch t {
         case "hello":   handleHello(obj, client: client)
-        case "cmd":     guard client.handshakeDone else { return }; handleCmd(obj)
+        case "cmd":     guard client.handshakeDone else { return }; handleCmd(obj, client: client)
         case "listMixes": guard client.handshakeDone else { return }; handleListMixes(client: client)
         case "listOutputs": guard client.handshakeDone else { return }; handleListOutputs(client: client)
         case "diagnostics": guard client.handshakeDone else { return }; handleAudioDiagnostics(client: client)
@@ -396,15 +396,25 @@ public final class ControlServer: @unchecked Sendable {
 
     // MARK: - Command dispatch (mutates @MainActor model)
 
-    private func handleCmd(_ obj: [String: Any]) {
+    private func handleCmd(_ obj: [String: Any], client: Client) {
         guard let op = obj["op"] as? String else { return }
         let mixID = obj["mix"]   as? String
         let pos   = obj["pos"]   as? Double
         let delta = obj["delta"] as? Double
         let muted = obj["muted"] as? Bool
+        let receivedAt = ProcessInfo.processInfo.systemUptime
+        let fd = client.fd
+        let isMaster = ["setMasterPos", "nudgeMasterPos", "setMasterMuted"].contains(op)
+        if isMaster {
+            ControlLog.logger.notice("master command received fd=\(fd, privacy: .public) op=\(op, privacy: .public) pos=\(pos ?? .nan, privacy: .public) delta=\(delta ?? .nan, privacy: .public) muted=\(String(describing: muted), privacy: .public)")
+        }
 
         Task { @MainActor [weak self] in
             guard let self, let mixer = self.mixer else { return }
+            if isMaster {
+                let delay = (ProcessInfo.processInfo.systemUptime - receivedAt) * 1000
+                ControlLog.logger.notice("master command executing fd=\(fd, privacy: .public) op=\(op, privacy: .public) queuedMs=\(delay, privacy: .public)")
+            }
             switch op {
             case "setPos":        guard let id = mixID, let pos   else { return }; mixer.setPos(mixID: id, pos: pos)
             case "nudgePos":      guard let id = mixID, let delta else { return }; mixer.nudgePos(mixID: id, delta: delta)
