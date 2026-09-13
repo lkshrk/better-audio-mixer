@@ -4,12 +4,15 @@ import Foundation
 enum CA {
     static let hardwareWriteState = HardwareWriteState()
 
-    /// A timed-out accepted volume/release can still arrive after re-muting. HAL exposes
-    /// no request IDs or cancellation, so readback cannot clear that uncertainty.
+    /// A timed-out accepted write can still land shortly after. HAL exposes no request
+    /// IDs, so the device stays protected for a settle window before any new write.
     final class HardwareWriteState: @unchecked Sendable {
         private struct Device: Hashable { let uid: String; let id: AudioObjectID }
         private let lock = NSLock()
-        private var uncertain = Set<Device>()
+        private let settleWindow: TimeInterval
+        private var uncertain: [Device: Date] = [:]
+
+        init(settleWindow: TimeInterval = 2) { self.settleWindow = settleWindow }
 
         func perform(
             uid: String, device: AudioObjectID, protectingMute: Bool,
@@ -20,17 +23,20 @@ enum CA {
             // only if control-thread contention becomes material. Listener is independent.
             let result = lock.withLock {
                 let key = Device(uid: uid, id: device)
-                if uncertain.contains(key) {
-                    engineLog.error("hardware write blocked by an earlier unconfirmed request device=\(device, privacy: .public) protectingMute=\(protectingMute, privacy: .public)")
-                    if protectingMute { _ = confirm(true, {}) }
-                    // Best-effort protection cannot cancel an older pending write.
-                    return false
+                if let latched = uncertain[key] {
+                    if Date().timeIntervalSince(latched) < settleWindow {
+                        engineLog.error("hardware write blocked by an earlier unconfirmed request device=\(device, privacy: .public) protectingMute=\(protectingMute, privacy: .public)")
+                        if protectingMute { _ = confirm(true, {}) }
+                        // Best-effort protection cannot cancel an older pending write.
+                        return false
+                    }
+                    uncertain[key] = nil
                 }
                 var accepted = false
                 let confirmed = confirm(false, { accepted = true })
                 if !protectingMute && accepted && !confirmed {
                     engineLog.error("hardware write accepted but unconfirmed; retaining protection device=\(device, privacy: .public)")
-                    uncertain.insert(key)
+                    uncertain[key] = Date()
                 }
                 return confirmed
             }
@@ -46,9 +52,10 @@ enum CA {
     static func confirmedWrite(
         _ object: AudioObjectID, _ addr: AudioObjectPropertyAddress,
         isCurrent: () -> Bool, write: () -> Bool, matches: () -> Bool,
+        landed: (() -> Bool)? = nil,
         timeout: TimeInterval = 0.5, forceWrite: Bool = false
     ) -> Bool {
-        confirmWrite(isCurrent: isCurrent, matches: matches, subscribe: { signal in
+        confirmWrite(isCurrent: isCurrent, matches: matches, landed: landed, subscribe: { signal in
             var address = addr
             let queue = DispatchQueue.global(qos: .userInitiated)
             let listener: AudioObjectPropertyListenerBlock = { _, _ in signal() }
@@ -59,8 +66,10 @@ enum CA {
 
     /// Injectable observation boundary for deterministic tests; never infers completion
     /// from a successful setter or a notification whose readback is still stale.
+    /// `matches` decides whether a write is needed; `landed` (default `matches`)
+    /// confirms the readback after the write.
     static func confirmWrite(
-        isCurrent: () -> Bool, matches: () -> Bool,
+        isCurrent: () -> Bool, matches: () -> Bool, landed: (() -> Bool)? = nil,
         subscribe: (@escaping @Sendable () -> Void) -> (() -> Void)?,
         write: () -> Bool, timeout: TimeInterval = 0.5, forceWrite: Bool = false,
         wait: (DispatchSemaphore, DispatchTime) -> Bool = { $0.wait(timeout: $1) == .success }
@@ -81,9 +90,10 @@ enum CA {
             if DispatchTime.now() >= deadline { return false }
         }
         guard isCurrent(), write() else { return false }
+        func hasLanded() -> Bool { landed.map { $0() } ?? matches() }
         while wait(signal, deadline) {
             guard isCurrent() else { return false }
-            if matches() { return isCurrent() }
+            if hasLanded() { return isCurrent() }
             if DispatchTime.now() >= deadline { return false }
         }
         return false
@@ -96,8 +106,19 @@ enum CA {
         // requested calibration independently, including newly scaled calibrations.
         guard target > 0, target < 1 else { return false }
         // ponytail: measured 12% writes can read 12.1502%; cap rounding acceptance at
-        // 0.2 percentage points AND 2% relative. Coarser devices need calibration.
+        // 0.2 percentage points AND 2% relative.
         return abs(actual - target) <= min(0.002, target * 0.02)
+    }
+
+    /// Devices quantize scalars (USB dB steps read back ±0.005, 1/16-step devices ±0.03).
+    static let volumeLandingTolerance: Float = 0.07
+
+    /// Post-write confirmation: the request landed on a quantizing device.
+    static func volumeLanded(_ actual: Float?, target: Float) -> Bool {
+        guard let actual, actual.isFinite, (0...1).contains(actual), target.isFinite else { return false }
+        if actual == target { return true }
+        guard target > 0, target < 1 else { return false }
+        return abs(actual - target) <= volumeLandingTolerance
     }
 
     static func uint32Value(_ object: AudioObjectID, _ addr: AudioObjectPropertyAddress) -> UInt32? {

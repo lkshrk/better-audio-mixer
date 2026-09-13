@@ -557,7 +557,8 @@ public actor CoreAudioEngine: AudioEngineProtocol {
                     if result { accepted() }
                     return result
                 },
-                matches: { CA.volumeMatches(CA.float32(device, address), target: value) }, forceWrite: forceWrite)
+                matches: { CA.volumeMatches(CA.float32(device, address), target: value) },
+                landed: { CA.volumeLanded(CA.float32(device, address), target: value) }, forceWrite: forceWrite)
         }
     }
 

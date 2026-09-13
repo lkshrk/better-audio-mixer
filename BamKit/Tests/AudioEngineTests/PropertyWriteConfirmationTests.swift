@@ -84,6 +84,20 @@ final class PropertyWriteConfirmationTests: XCTestCase {
         }, "a distinct AudioObjectID has no pending request from the old device")
     }
 
+    func testUnconfirmedWriteLatchExpiresAfterSettleWindow() {
+        let state = CA.HardwareWriteState(settleWindow: 0)
+        XCTAssertFalse(state.perform(uid: "device", device: 7, protectingMute: false) { _, accepted in
+            accepted(); return false
+        })
+        var writes = 0
+        XCTAssertTrue(state.perform(uid: "device", device: 7, protectingMute: false) { force, _ in
+            XCTAssertFalse(force)
+            writes += 1
+            return true
+        }, "a settled device accepts new writes again")
+        XCTAssertEqual(writes, 1)
+    }
+
     func testUnacceptedReleaseFailureDoesNotLatchPendingHardwareRequest() {
         let state = CA.HardwareWriteState()
         XCTAssertFalse(state.perform(uid: "device", device: 7, protectingMute: false) { _, _ in false })
@@ -193,6 +207,28 @@ final class PropertyWriteConfirmationTests: XCTestCase {
         XCTAssertFalse(CA.volumeMatches(0.0011, target: 0.001))
         XCTAssertFalse(CA.volumeMatches(nil, target: 0))
         XCTAssertFalse(CA.volumeMatches(.nan, target: 0.12))
+    }
+
+    func testQuantizedReadbackConfirmsLandingButNotSkipping() {
+        XCTAssertFalse(CA.volumeMatches(0.164604, target: 0.166667))
+        XCTAssertTrue(CA.volumeLanded(0.164604, target: 0.166667), "USB dB-step readback")
+        XCTAssertTrue(CA.volumeLanded(0.1875, target: 0.166667), "1/16-step readback")
+        XCTAssertFalse(CA.volumeLanded(0.25, target: 0.12))
+        XCTAssertFalse(CA.volumeLanded(1, target: 0.12))
+        XCTAssertFalse(CA.volumeLanded(0.001, target: 0))
+        XCTAssertFalse(CA.volumeLanded(0.999, target: 1))
+        XCTAssertFalse(CA.volumeLanded(nil, target: 0.12))
+    }
+
+    func testLandedReadbackAcceptsWriteThatMatchesLoosely() {
+        var notify: (@Sendable () -> Void)?
+        var volume: Float = 0
+        XCTAssertTrue(CA.confirmWrite(isCurrent: { true },
+            matches: { CA.volumeMatches(volume, target: 0.166667) },
+            landed: { CA.volumeLanded(volume, target: 0.166667) },
+            subscribe: { signal in notify = signal; return {} },
+            write: { volume = 0.164604; notify?(); return true },
+            wait: { signal, _ in signal.wait(timeout: .now()) == .success }))
     }
 
     func testUnconfirmedChannelVolumeNeverReleasesAnyMute() {
