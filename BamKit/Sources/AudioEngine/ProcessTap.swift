@@ -89,7 +89,7 @@ final class ProcessTap {
         return status == noErr && size == MemoryLayout<CATapDescription?>.size ? value : nil
     }
 
-    private static func readFormat(_ tapID: AudioObjectID) -> AudioStreamBasicDescription? {
+    static func readFormat(_ tapID: AudioObjectID) -> AudioStreamBasicDescription? {
         var addr = CA.address(kAudioTapPropertyFormat)
         var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
         var asbd = AudioStreamBasicDescription()

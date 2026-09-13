@@ -160,54 +160,77 @@ final class ConsoleViewModelUseCaseTests: XCTestCase {
         await model.stop()
     }
 
-    // MARK: volume restore (driver on — gated on real captured audio)
+    // MARK: protected startup volume
 
-    func testRestoreLeavesStockLevelWhileTapNotCapturing() async {
-        // Silent router → meter frames stay at floor → setup not yet ready
-        // (permission popup still pending). The device must stay at its STOCK level
-        // (mock starts at 0.8), untouched — no dim, no mute — until capture confirms.
+    func testSilentStartupRestoresSavedLevelOnceBeforeUnmuting() async {
         let mock = MockAudioEngine(silentRouter: true)
         let model = makeModel(engine: mock, driver: true, saved: 0.6)
         await model.startMock(config: BamConfig())
+        await model.restoreOutputVolume() // Already applied; must not start a second restore.
 
-        let restore = Task { await model.restoreOutputVolume() }
-        try? await Task.sleep(for: .milliseconds(350))
-
-        let dev = await mock.outputVolume(uid: "MockOutput")
-        XCTAssertEqual(dev ?? -1, 0.8, accuracy: 0.001, "device stays at stock until setup is ready")
-        XCTAssertEqual(model.outputVolume, 0.6, accuracy: 0.001, "fader still shows the bam-level seed")
-
-        restore.cancel()
-        await model.stop()
-    }
-
-    func testRestoreRaisesOnceTapCaptures() async {
-        // Non-silent router → meter frames rise above floor → permission granted,
-        // apps muted, safe to restore the saved level.
-        let mock = MockAudioEngine()
-        let model = makeModel(engine: mock, driver: true, saved: 0.6)
-        await model.startMock(config: BamConfig())
-
-        await model.restoreOutputVolume()
-
-        let dev = await mock.outputVolume(uid: "MockOutput")
-        XCTAssertEqual(dev ?? -1, 0.6, accuracy: 0.001, "once capturing, restore raises to the saved level")
-        XCTAssertEqual(model.outputVolume, 0.6, accuracy: 0.001)
-        await model.stop()
-    }
-
-    func testStopInvalidatesStartupRestoreWaitingForCapture() async {
-        let mock = MockAudioEngine(silentRouter: true)
-        let model = makeModel(engine: mock, driver: true, saved: 0.6)
-        await model.startMock(config: BamConfig())
-        let restore = Task { await model.restoreOutputVolume() }
-        try? await Task.sleep(for: .milliseconds(100))
-        await model.stop()
-        await mock.resetCalls()
-        await restore.value
         let calls = await mock.calls
-        XCTAssertTrue(calls.isEmpty, "stale startup task must not write after teardown")
+        let writes = calls.filter { if case .setOutputVolume = $0 { return true }; return false }
+        XCTAssertEqual(writes, [.setOutputVolume(uid: "MockOutput", volume: 0.6)])
+        let volumeIndex = calls.firstIndex(of: .setOutputVolume(uid: "MockOutput", volume: 0.6))!
+        let unmuteIndex = calls.firstIndex(of: .setOutputMuted(uid: "MockOutput", muted: false))!
+        XCTAssertLessThan(volumeIndex, unmuteIndex)
+        XCTAssertEqual(model.outputVolume, 0.6, accuracy: 0.001)
+        XCTAssertTrue(model.bamVolumeApplied)
+        XCTAssertEqual(model.stockOutputStates["MockOutput"]?.volume ?? -1, 0.8, accuracy: 0.001)
+        await model.stop()
+    }
+
+    func testFailedStartupRetainsSavedTargetForProtectedRetry() async {
+        let mock = MockAudioEngine(silentRouter: true)
+        await mock.scriptRouterStatuses([RouterStatus(cause: .buildFailed), .ok])
+        let model = makeModel(engine: mock, driver: true, saved: 0.6)
+        await model.startMock(config: BamConfig())
         XCTAssertFalse(model.bamVolumeApplied)
+        XCTAssertEqual(model.guardedOutputs["MockOutput"]?.volume ?? -1, 0.6, accuracy: 0.001)
+        await model.restoreOutputVolume()
+        XCTAssertTrue(model.bamVolumeApplied)
+        let volume = await mock.outputVolume(uid: "MockOutput")
+        XCTAssertEqual(volume ?? -1, 0.6, accuracy: 0.001)
+        await model.stop()
+    }
+
+    func testReboundStartupTransfersSavedAndNewerLogicalTargetBeforeUnmute() async {
+        for newerTarget in [false, true] {
+            let mock = MockAudioEngine(silentRouter: true)
+            await mock.setResolvedOutputUIDForTests("ReboundOutput")
+            let model = makeModel(engine: mock, driver: true, saved: 0.6)
+            if newerTarget {
+                await mock.setOutputVolumeRestoreHookForTests { @MainActor in
+                    // UI still refers to the stored UID until startup reconciles it.
+                    model.setOutputVolume(0.3)
+                }
+            }
+            await model.startMock(config: BamConfig())
+            await model.enqueueRouterWork { _ in }.value
+            let calls = await mock.calls
+            let target: Float = newerTarget ? 0.3 : 0.6
+            let writeIndex = calls.firstIndex(of: .setOutputVolume(uid: "ReboundOutput", volume: target))!
+            let unmuteIndex = calls.firstIndex(of: .setOutputMuted(uid: "ReboundOutput", muted: false))!
+            XCTAssertLessThan(writeIndex, unmuteIndex)
+            XCTAssertEqual(model.systemOutputUID, "ReboundOutput")
+            let volume = await mock.outputVolume(uid: "ReboundOutput")
+            XCTAssertEqual(volume ?? -1, target, accuracy: 0.001)
+            XCTAssertEqual(model.stockOutputStates["ReboundOutput"]?.volume ?? -1, 0.8, accuracy: 0.001)
+            await model.stop()
+        }
+    }
+
+    func testStartupKeepsMasterMutedAtSavedLevel() async {
+        let mock = MockAudioEngine(silentRouter: true)
+        let model = makeModel(engine: mock, driver: true, saved: 0.6)
+        var config = BamConfig()
+        config.masterMuted = true
+        await model.startMock(config: config)
+        let calls = await mock.calls
+        XCTAssertTrue(calls.contains(.setOutputVolume(uid: "MockOutput", volume: 0.6)))
+        XCTAssertFalse(calls.contains(.setOutputMuted(uid: "MockOutput", muted: false)))
+        XCTAssertTrue(model.bamVolumeApplied)
+        await model.stop()
     }
 
     func testStaleRouterStartCannotOverwriteNewerGainConfig() async {

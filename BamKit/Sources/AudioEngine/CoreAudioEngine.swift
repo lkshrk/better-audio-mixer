@@ -119,6 +119,14 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         router = RouterAggregate(taps: [], resources: resources)
     }
     func hasRouterForTests() -> Bool { router != nil }
+    func checkRouterHealthForTests() async -> Bool {
+        guard let signature = routerTapSig else { return false }
+        var state = RouterHealthState()
+        return await checkRouterHealth(signature: signature, generation: routerGeneration, state: &state)
+    }
+    func routerStartupStateForTests() -> (pending: String?, deviceIDs: [String: AudioObjectID], monitoring: Bool) {
+        (pendingRouterTapSig, appliedDeviceIDs, routerHealthTask != nil)
+    }
 
     /// The output UID the running aggregate is actually bound to, after live-list
     /// resolution. May differ from the stored config UID when a device re-enumerated;
@@ -172,12 +180,14 @@ public actor CoreAudioEngine: AudioEngineProtocol {
     /// When the next desired signature matches, the aggregate is left running and
     /// only its gains are refolded — no rebuild, no offline flash.
     private var routerTapSig: String?
+    /// HAL started successfully, but a fresh valid callback has not confirmed readiness.
+    private var pendingRouterTapSig: String?
     private var lastHealthyObservation: ContinuousClock.Instant?
     private var routerGeneration = 0
     private var healthyGeneration: Int?
     private var appliedDeviceIDs: [String: AudioObjectID] = [:]
 
-    struct SourceFormat: Equatable {
+    struct SourceFormat: Equatable, Sendable {
         let sampleRate: Double
         let channels: Int
     }
@@ -207,16 +217,25 @@ public actor CoreAudioEngine: AudioEngineProtocol {
 
     private static let healthGainFloor: Double = 0.0001
 
-    public init() {}
+    typealias Polling = (playing: @Sendable () -> Set<String>, processes: @Sendable () -> [AudioProcessInfo])
+    private nonisolated let polling: Polling
 
-    public func outputDevices() -> [AudioDevice] {
-        ProcessEnumerator.systemOutputDevices().map {
-            AudioDevice(uid: $0.uid, name: $0.name, transportType: $0.transportType)
-        }
+    public init() {
+        polling = (ProcessEnumerator.playingBundleIDs, { ProcessEnumerator.allProcesses() })
     }
 
-    public func defaultOutputUID() -> String? {
-        ProcessEnumerator.defaultOutputDeviceUID()
+    init(polling: Polling) { self.polling = polling }
+
+    public nonisolated func outputDevices() async -> [AudioDevice] {
+        await Task.detached(priority: .utility) {
+            ProcessEnumerator.systemOutputDevices().map {
+                AudioDevice(uid: $0.uid, name: $0.name, transportType: $0.transportType)
+            }
+        }.value
+    }
+
+    public nonisolated func defaultOutputUID() async -> String? {
+        await Task.detached(priority: .utility) { ProcessEnumerator.defaultOutputDeviceUID() }.value
     }
 
     /// The output device the live aggregate is bound to (post live-list resolution).
@@ -228,7 +247,13 @@ public actor CoreAudioEngine: AudioEngineProtocol {
     /// keeps the serial-bearing prefix). Missing or ambiguous selections stay
     /// unavailable; only an initial, unset selection can use the system default.
     static func resolveOutputUID(stored: String?) -> String? {
-        resolveOutputUID(stored: stored,
+        if let stored, let device = ProcessEnumerator.deviceID(forUID: stored) {
+            let streams: [AudioObjectID] = CA.array(device,
+                CA.address(kAudioDevicePropertyStreams, kAudioDevicePropertyScopeOutput),
+                of: AudioObjectID.self)
+            if !streams.isEmpty { return stored }
+        }
+        return resolveOutputUID(stored: stored,
                          liveUIDs: ProcessEnumerator.systemOutputDevices().map(\.uid),
                          defaultUID: stored == nil ? ProcessEnumerator.defaultOutputDeviceUID() : nil)
     }
@@ -264,7 +289,11 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         return uid
     }
 
-    public func outputVolume(uid: String) -> Float? { recoveryOutputIntent[uid]?.volume ?? Self.resolvedDeviceVolume(uid: uid) }
+    public func outputVolume(uid: String) async -> Float? {
+        if let intended = recoveryOutputIntent[uid] { return intended.volume }
+        let observed = await Task.detached(priority: .utility) { Self.resolvedDeviceVolume(uid: uid) }.value
+        return recoveryOutputIntent[uid]?.volume ?? observed
+    }
 
     public func outputDeviceState(uid: String) async -> OutputDeviceState? {
         recoveryOutputIntent[uid] ?? Self.resolvedDeviceState(uid: uid)
@@ -276,7 +305,26 @@ public actor CoreAudioEngine: AudioEngineProtocol {
     }
 
     public func restoreOutputDeviceState(_ state: OutputDeviceState, restoreVolume: Bool, restoreMute: Bool) async -> OutputWriteResult {
-        restoreDeviceState(state, restoreVolume: restoreVolume, restoreMute: restoreMute)
+        if restoreMute, state.mutes.values.contains(false), !outputReleaseReady {
+            engineLog.error("hardware release blocked: pending=\(self.pendingRouterTapSig != nil, privacy: .public) uncertainMembership=\(self.routerMembershipUncertain, privacy: .public)")
+            // Preserve a valid user mute intent for engine-owned recovery, but
+            // never release hardware while the renderer is still pending.
+            if let intended = recoveryOutputIntent[state.uid], intended.deviceID == state.deviceID,
+               Set(intended.mutes.keys) == Set(state.mutes.keys) {
+                recoveryOutputIntent[state.uid]?.mutes = state.mutes
+            }
+            return .failed
+        }
+        let result = restoreDeviceState(state, restoreVolume: restoreVolume, restoreMute: restoreMute)
+        if restoreMute {
+            engineLog.notice("hardware mute restore target=\(state.muted, privacy: .public) applied=\(result == .applied, privacy: .public)")
+        }
+        return result
+    }
+
+    private var outputReleaseReady: Bool {
+        pendingRouterTapSig == nil && !routerMembershipUncertain
+            && ((router == nil && liveTaps.isEmpty) || routerTapSig != nil)
     }
 
     private static func resolvedDeviceState(uid: String) -> OutputDeviceState? {
@@ -437,11 +485,18 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         if let intended = recoveryOutputIntent[uid] {
             recoveryOutputIntent[uid]?.mutes = intended.mutes.mapValues { _ in muted }
         }
+        guard muted || outputReleaseReady else { return }
         Self.setDeviceMuted(uid: uid, muted)
     }
 
     public func setOutputMutedChecked(uid: String, _ muted: Bool) async -> OutputWriteResult {
-        writeOutputMute(uid: uid, muted)
+        if !muted && !outputReleaseReady {
+            if let intended = recoveryOutputIntent[uid] {
+                recoveryOutputIntent[uid]?.mutes = intended.mutes.mapValues { _ in false }
+            }
+            return .failed
+        }
+        return writeOutputMute(uid: uid, muted)
     }
 
     private func writeOutputMute(uid: String, _ muted: Bool) -> OutputWriteResult {
@@ -557,30 +612,28 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         return buffers.reduce(0) { $0 + Int($1.mNumberChannels) }
     }
 
-    public func playingBundleIDs() -> Set<String> {
-        Set(ProcessEnumerator.allProcesses()
-            .filter { $0.isRunningOutput && !$0.bundleID.isEmpty }
-            .map(\.bundleID))
+    public nonisolated func playingBundleIDs() async -> Set<String> {
+        let read = polling.playing
+        return await Task.detached(priority: .utility) { read() }.value
     }
 
-    public func runningAudioApps() -> [AudioApp] {
-        let selfBundle = Bundle.main.bundleIdentifier
-        var seen = Set<String>()
-        return NSWorkspace.shared.runningApplications
-            .filter {
-                $0.activationPolicy == .regular
-                && $0.bundleIdentifier != nil
-                && $0.bundleIdentifier != selfBundle
-            }
-            .compactMap { app -> AudioApp? in
-                let bid = app.bundleIdentifier!
-                guard seen.insert(bid).inserted else { return nil }
-                return AudioApp(
-                    bundleID: bid,
-                    displayName: app.localizedName ?? Self.displayName(bid)
-                )
-            }
-            .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    public nonisolated func runningAudioApps() async -> [AudioApp] {
+        await Task.detached(priority: .utility) {
+            let selfBundle = Bundle.main.bundleIdentifier
+            var seen = Set<String>()
+            return NSWorkspace.shared.runningApplications
+                .filter {
+                    $0.activationPolicy == .regular
+                    && $0.bundleIdentifier != nil
+                    && $0.bundleIdentifier != selfBundle
+                }
+                .compactMap { app -> AudioApp? in
+                    let bid = app.bundleIdentifier!
+                    guard seen.insert(bid).inserted else { return nil }
+                    return AudioApp(bundleID: bid, displayName: app.localizedName ?? Self.displayName(bid))
+                }
+                .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+        }.value
     }
 
     public func stop() {
@@ -685,7 +738,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
     }
 
     public func canKeepCurrentRouter(config: BamConfig) async -> Bool {
-        guard !routerMembershipUncertain, config == routerConfig, let router, routerHealthTask != nil,
+        guard !routerMembershipUncertain, config == routerConfig, router != nil, routerHealthTask != nil,
               rearmTasks.isEmpty, suspendedRecoveries.isEmpty, recoveryOutputIntent.isEmpty,
               let baseline = routerHealthBaseline, baseline.generation == routerGeneration,
               let expectedRate = baseline.outputSampleRate,
@@ -714,8 +767,10 @@ public actor CoreAudioEngine: AudioEngineProtocol {
             currentDevices: Dictionary(uniqueKeysWithValues: ids.compactMap { uid in
                 ProcessEnumerator.deviceID(forUID: uid).map { (uid, $0) }
             }), appliedDevices: appliedDeviceIDs,
-            currentFormats: Dictionary(uniqueKeysWithValues: router.sourceHealthSnapshots().map {
-                ($0.sourceID, SourceFormat(sampleRate: $0.sampleRate, channels: $0.channels))
+            currentFormats: Dictionary(uniqueKeysWithValues: liveTaps.compactMap { id, entry in
+                entry.tap.proc.currentFormat().map {
+                    (id, SourceFormat(sampleRate: $0.mSampleRate, channels: Int($0.mChannelsPerFrame)))
+                }
             }), appliedFormats: baseline.sourceFormats,
             generation: routerGeneration, healthyGeneration: healthyGeneration,
             observedAt: lastHealthyObservation)
@@ -894,11 +949,15 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         }
 
         let aggSig = outputUID + "|" + orderedTaps.map(\.proc.uuid).joined(separator: ",")
-        if let live = router, routerTapSig == aggSig {
+        if let live = router, routerTapSig == aggSig || pendingRouterTapSig == aggSig {
             // Tap set AND output unchanged → leave the running aggregate alone and
             // only refold gains. This is the hot path for ordinary edits: no
             // rebuild, no offline flash, no blast.
             applyRouterGains(config, to: live)
+            if pendingRouterTapSig != nil {
+                return checkPendingRouterReadiness() ? .ok
+                    : RouterStatus(failedMixIDs: config.mixes.map(\.id), cause: .buildFailed)
+            }
             return .ok
         }
 
@@ -938,19 +997,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
             }
             engineSignposter.endInterval("CoreAudioEngine.rebuildAggregate", aggregateSignpostState)
             applyRouterGains(config, to: agg)
-            guard agg.hasCompatibleTapFormats(),
-                  agg.waitUntilReady(after: agg.readinessToken),
-                  agg.hasCompatibleTapFormats() else {
-                routerTapSig = nil
-                builtOK = false
-                _ = closeRouter()
-                return
-            }
-            routerMembershipUncertain = false
-            router = agg
-            routerTapSig = aggSig
-            _boundOutputUID = outputUID
-            appliedDeviceIDs = currentDeviceIDs
+            trackStartedRouter(signature: aggSig, outputUID: outputUID, deviceIDs: currentDeviceIDs)
             routerHealthBaseline = RouterHealthBaseline(
                 generation: routerGeneration,
                 outputUID: outputUID,
@@ -962,15 +1009,46 @@ public actor CoreAudioEngine: AudioEngineProtocol {
                     ))
                 })
             )
-            startRouterHealthMonitor(signature: aggSig)
-            engineLog.notice(
-                "startRouter: aggregate live taps=\(orderedTaps.count, privacy: .public) output=\(outputUID, privacy: .private)"
-            )
-            emitRouterRecoveryEvent(.recovered)
+            builtOK = checkPendingRouterReadiness()
         }
         doRebuild()
         if !builtOK { return failureStatus }
         return .ok
+    }
+
+    /// Track the actual renderer even while the caller keeps it hardware-muted.
+    func trackStartedRouter(signature: String, outputUID: String, deviceIDs: [String: AudioObjectID]) {
+        routerTapSig = nil
+        pendingRouterTapSig = signature
+        _boundOutputUID = outputUID
+        appliedDeviceIDs = deviceIDs
+    }
+
+    private func checkPendingRouterReadiness() -> Bool {
+        guard let router else { return false }
+        let formatsBefore = router.hasCompatibleTapFormats()
+        let ready = formatsBefore && router.waitUntilReady(after: router.readinessToken)
+        let formatsAfter = router.hasCompatibleTapFormats()
+        return completeRouterStartup(formatsBefore: formatsBefore, ready: ready, formatsAfter: formatsAfter)
+    }
+
+    /// Boolean observation boundary lets tests exercise pending ownership without HAL.
+    func completeRouterStartup(formatsBefore: Bool, ready: Bool, formatsAfter: Bool) -> Bool {
+        guard let agg = router, let signature = pendingRouterTapSig else { return false }
+        guard formatsBefore, ready, formatsAfter else {
+            engineLog.error("router readiness rejected formatsBefore=\(formatsBefore, privacy: .public) ready=\(ready, privacy: .public) formatsAfter=\(formatsAfter, privacy: .public) \(agg.startupDiagnostics, privacy: .public)")
+            // A slow first callback must not restart its own startup clock on every retry.
+            // Keep valid started resources protected; incompatible formats still require teardown.
+            if !formatsBefore || !formatsAfter { _ = closeRouter() }
+            return false
+        }
+        pendingRouterTapSig = nil
+        routerTapSig = signature
+        routerMembershipUncertain = false
+        startRouterHealthMonitor(signature: signature)
+        engineLog.notice("startRouter: aggregate live taps=\(self.liveTaps.count, privacy: .public) output=\(self._boundOutputUID ?? "unknown", privacy: .private)")
+        emitRouterRecoveryEvent(.recovered)
+        return true
     }
 
     private func startRouterHealthMonitor(signature: String) {
@@ -998,14 +1076,41 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         signature: String,
         generation: Int,
         state: inout RouterHealthState
-    ) -> Bool {
+    ) async -> Bool {
+        guard !Task.isCancelled, generation == routerGeneration,
+              routerTapSig == signature, router != nil, routerConfig != nil else { return false }
+        if routerRecoverySuspended { return true }
+        let tapIDs = liveTaps.mapValues { $0.tap.proc.tapID }
+        let outputUID = routerHealthBaseline?.outputUID
+        let readProcesses = polling.processes
+        let scan = Task.detached(priority: .utility) { () -> ([AudioProcessInfo], [String: SourceFormat], Double?) in
+            let processes = readProcesses()
+            var formats: [String: SourceFormat] = [:]
+            for (id, tapID) in tapIDs where !Task.isCancelled {
+                if let format = ProcessTap.readFormat(tapID) {
+                    formats[id] = SourceFormat(sampleRate: format.mSampleRate, channels: Int(format.mChannelsPerFrame))
+                }
+            }
+            let rate = !Task.isCancelled ? outputUID.flatMap { Self.deviceSampleRate(uid: $0) } : nil
+            return (processes, formats, rate)
+        }
+        let observation = await withTaskCancellationHandler(operation: { await scan.value }, onCancel: { scan.cancel() })
+        // Device queries may outlive a switch/stop. Never apply their result to
+        // another generation or make controls wait for those read-only queries.
         guard !Task.isCancelled, generation == routerGeneration,
               routerTapSig == signature, let router, let config = routerConfig else { return false }
         if routerRecoverySuspended { return true }
         let h = router.healthSnapshot()
-        let sourceHealth = router.sourceHealthSnapshots()
+        let sourceHealth = router.sourceHealthSnapshots().map { snapshot in
+            var current = snapshot
+            if let format = observation.1[snapshot.sourceID] {
+                current.sampleRate = format.sampleRate
+                current.channels = format.channels
+            }
+            return current
+        }
         let sourceHealthByID = Dictionary(uniqueKeysWithValues: sourceHealth.map { ($0.sourceID, $0) })
-        let processSnapshot = ProcessEnumerator.allProcesses()
+        let processSnapshot = observation.0
         let expectedSourceIDs = expectedAudibleSourceIDs(config: config, processes: processSnapshot)
         state.retainExpectedSources(expectedSourceIDs)
 
@@ -1028,7 +1133,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
             return false
         }
 
-        if outputFormatDrifted() {
+        if outputFormatDrifted(current: observation.2) {
             state.outputFormatDriftSamples += 1
         } else {
             state.outputFormatDriftSamples = 0
@@ -1107,10 +1212,10 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         snapshot.limiterFailures > 0 || state.staleSamples >= 3 || state.noInputSamples >= 3
     }
 
-    private func outputFormatDrifted() -> Bool {
+    private func outputFormatDrifted(current: Double?) -> Bool {
         guard let baseline = routerHealthBaseline,
               let expected = baseline.outputSampleRate,
-              let current = Self.deviceSampleRate(uid: baseline.outputUID)
+              let current
         else { return false }
         return abs(current - expected) > 1
     }
@@ -1189,6 +1294,10 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         routerHealthTask?.cancel()
         routerHealthTask = nil
         let restored = performGuardedOutputRebuild(uids: resolvedRouterOutputUIDs(config: config), unmute: !config.masterMuted) {
+            if allowOffline, pendingRouterTapSig != nil {
+                guard case .attempting = event else { return false }
+                return !(recoveryTestHooks?.rebuild() ?? self.startRouter(config: config)).isFailure
+            }
             routerGeneration += 1
             recoveryTestHooks?.willTearDown()
             guard closeRouter() else { return false }
@@ -1393,6 +1502,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         // Once close is attempted, this generation must never take the reuse
         // path even if only some HAL teardown stages succeeded.
         routerTapSig = nil
+        pendingRouterTapSig = nil
         guard router?.close() ?? true else { return false }
         if var snapshot = router?.audioDiagnostics() {
             snapshot.generation = diagnosticsGeneration
@@ -1422,6 +1532,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         rearmTasks.removeAll()
         guard closeRouter() else { return false }
         liveTaps.removeAll()
+        routerMembershipUncertain = false
         routerConfig = nil
         routerTapSig = nil
         routerHealthBaseline = nil

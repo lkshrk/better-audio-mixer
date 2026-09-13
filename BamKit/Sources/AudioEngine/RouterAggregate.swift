@@ -39,8 +39,8 @@ final class RouterAggregate {
         let inputBlocks: Int
         let inputFrames: Int
         let meter: Float
-        let sampleRate: Double
-        let channels: Int
+        var sampleRate: Double
+        var channels: Int
     }
 
     /// One captured source: its tap, channel count, live L/R gain and meter.
@@ -71,6 +71,27 @@ final class RouterAggregate {
     final class CaptureReadiness {
         private let started = ManagedAtomic<UInt64>(0)
         private let completed = ManagedAtomic<UInt64>(0)
+        private let inputBuffers = ManagedAtomic<Int>(0)
+        private let inputChannels = ManagedAtomic<Int>(0)
+        private let inputBytes = ManagedAtomic<Int>(0)
+        private let outputBuffers = ManagedAtomic<Int>(0)
+        private let outputChannels = ManagedAtomic<Int>(0)
+        private let outputBytes = ManagedAtomic<Int>(0)
+        func observe(input: UnsafeMutableAudioBufferListPointer, output: UnsafeMutableAudioBufferListPointer) {
+            var inChannels = 0, inBytes = 0, outChannels = 0, outBytes = 0
+            for buffer in input { inChannels += Int(buffer.mNumberChannels); inBytes += Int(buffer.mDataByteSize) }
+            for buffer in output { outChannels += Int(buffer.mNumberChannels); outBytes += Int(buffer.mDataByteSize) }
+            inputBuffers.store(input.count, ordering: .relaxed)
+            inputChannels.store(inChannels, ordering: .relaxed)
+            inputBytes.store(inBytes, ordering: .relaxed)
+            outputBuffers.store(output.count, ordering: .relaxed)
+            outputChannels.store(outChannels, ordering: .relaxed)
+            outputBytes.store(outBytes, ordering: .relaxed)
+        }
+        // Fieldwise diagnostic observations only; never used to authorize playback.
+        var diagnosticSummary: String {
+            "started=\(started.load(ordering: .acquiring)) completed=\(completed.load(ordering: .acquiring)) input=\(inputBuffers.load(ordering: .relaxed))/\(inputChannels.load(ordering: .relaxed))/\(inputBytes.load(ordering: .relaxed)) output=\(outputBuffers.load(ordering: .relaxed))/\(outputChannels.load(ordering: .relaxed))/\(outputBytes.load(ordering: .relaxed))"
+        }
         var token: UInt64 { started.load(ordering: .acquiring) }
         func beginCallback() -> UInt64 {
             started.wrappingIncrementThenLoad(ordering: .releasing)
@@ -89,6 +110,7 @@ final class RouterAggregate {
         }
     }
     private let readiness = CaptureReadiness()
+    var startupDiagnostics: String { "expectedTapChannels=\(taps.map(\.channels)) \(readiness.diagnosticSummary)" }
     var readinessToken: UInt64 { readiness.token }
 
     /// Call on the control thread after applying gains/membership changes.
@@ -359,7 +381,9 @@ final class RouterAggregate {
 
     func sourceHealthSnapshots() -> [SourceHealthSnapshot] {
         taps.map { tap in
-            let format = tap.proc.currentFormat() ?? tap.proc.format
+            // This hot snapshot reads atomics and frozen metadata only. Live HAL
+            // format observation belongs to the background health scan.
+            let format = tap.proc.format
             return SourceHealthSnapshot(
                 sourceID: tap.sourceID,
                 inputBlocks: tap.inputBlocks.load(ordering: .relaxed),
@@ -445,6 +469,7 @@ final class RouterAggregate {
             let callbackStart = mach_absolute_time()
             let inABL = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inInputData))
             let outABL = UnsafeMutableAudioBufferListPointer(outOutputData)
+            readiness.observe(input: inABL, output: outABL)
             // Silence every supplied output even when its layout is rejected.
             for buffer in outABL {
                 if let data = buffer.mData {

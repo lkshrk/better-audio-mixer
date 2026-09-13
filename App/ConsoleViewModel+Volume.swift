@@ -3,6 +3,14 @@ import BamCore
 import Foundation
 
 extension ConsoleViewModel {
+    /// Explicit master-unmute releases a whole-device mute, including one left
+    /// by failed startup. Partial channel mute calibration remains intact.
+    nonisolated static func outputStateWithMasterUnmuted(_ state: OutputDeviceState) -> OutputDeviceState {
+        var result = state
+        if state.muted { result.mutes = state.mutes.mapValues { _ in false } }
+        return result
+    }
+
     func captureOutputState(uid: String) async -> OutputDeviceState? {
         guard let state = await engine.outputDeviceState(uid: uid) else { return nil }
         rememberOutputState(state)
@@ -92,11 +100,15 @@ extension ConsoleViewModel {
         let generation = routerWorkGeneration
         var uids = await engine.routerOutputUIDs(config: draft)
         // A failed earlier switch may have protected another still-connected output.
-        let available = Set(await engine.outputDevices().map(\.uid))
-        uids.formUnion(available.intersection(guardedOutputs.keys))
+        if !guardedOutputs.isEmpty {
+            let available = Set(await engine.outputDevices().map(\.uid))
+            uids.formUnion(available.intersection(guardedOutputs.keys))
+        }
         let requested = Self.hardwareOutputUID(in: draft)
         let overrides: [String: Float]
-        if let requested, let targetVolume { overrides = [requested: Float(targetVolume)] }
+        if let requested, let target = targetVolume.map(Float.init) ?? (!bamVolumeApplied ? requestedOutputVolumes[requested] : nil) {
+            overrides = [requested: target]
+        }
         else { overrides = [:] }
         guard await protectOutputs(uids, overriding: overrides) else {
             return outputProtectionFailed()
@@ -107,6 +119,13 @@ extension ConsoleViewModel {
         guard !status.isFailure else { return status }
         guard !Task.isCancelled, generation == routerWorkGeneration else { return outputProtectionFailed() }
         let bound = await engine.boundOutputUID()
+        func transferReboundTarget() {
+            guard let bound, let requested, bound != requested,
+                  let original = overrides[requested] else { return }
+            let intentUID = systemOutputUID == bound ? bound : requested
+            guardedOutputs[bound]?.volume = requestedOutputVolumes[intentUID] ?? original
+        }
+        transferReboundTarget()
         // Restore/fade the new output first; release the previous capture device last.
         let ordered = uids.sorted { a, b in
             if a == bound { return b != bound }
@@ -119,6 +138,7 @@ extension ConsoleViewModel {
                   await engine.setOutputMutedChecked(uid: uid, true) == .applied else {
                 return outputProtectionFailed()
             }
+            transferReboundTarget()
             let muted = config.masterMuted || (guardedOutputs[uid]?.muted ?? saved.muted)
             if fadeIn, uid == bound, !muted {
                 guard await engine.setOutputVolumeChecked(uid: uid, 0) == .applied,
@@ -131,16 +151,22 @@ extension ConsoleViewModel {
                         return outputProtectionFailed()
                     }
                 }
-                guard await rampOutputVolume(uid: uid, from: 0, to: Double(saved.volume)) else {
+                guard await rampOutputVolume(uid: uid, from: 0, to: Double(saved.volume),
+                                             intentUID: uid == requested ? nil : requested) else {
                     _ = await engine.setOutputMutedChecked(uid: uid, true)
                     return outputProtectionFailed()
                 }
             } else {
-                let state = guardedOutputs[uid]?.state ?? saved.state
-                guard await engine.restoreOutputDeviceState(state, restoreVolume: true, restoreMute: false) == .applied else {
-                    return outputProtectionFailed()
-                }
-                guard !Task.isCancelled, generation == routerWorkGeneration else { return outputProtectionFailed() }
+                var state: OutputDeviceState
+                repeat {
+                    transferReboundTarget()
+                    state = guardedOutputs[uid]?.state ?? saved.state
+                    guard await engine.restoreOutputDeviceState(state, restoreVolume: true, restoreMute: false) == .applied,
+                          !Task.isCancelled, generation == routerWorkGeneration else {
+                        return outputProtectionFailed()
+                    }
+                    transferReboundTarget()
+                } while (guardedOutputs[uid]?.state.volumes ?? state.volumes) != state.volumes
                 if !config.masterMuted, !(guardedOutputs[uid]?.muted ?? saved.muted) {
                     let state = guardedOutputs[uid]?.state ?? saved.state
                     guard await engine.restoreOutputDeviceState(state, restoreVolume: false, restoreMute: true) == .applied else {
@@ -148,11 +174,12 @@ extension ConsoleViewModel {
                     }
                 }
             }
-            if fadeIn, uid == bound { outputVolume = Double(guardedOutputs[uid]?.volume ?? saved.volume) }
+            if uid == systemOutputUID { outputVolume = Double(guardedOutputs[uid]?.volume ?? saved.volume) }
             await engine.acknowledgeOutputRestore(uids: [uid])
             guardedOutputs[uid] = nil
         }
         error = nil
+        bamVolumeApplied = true
         return status
     }
 
@@ -237,16 +264,15 @@ extension ConsoleViewModel {
 
     // MARK: master (the routed hardware device's own OS volume)
 
-    /// True when a router frame shows real captured audio on any source.
-    var captureConfirmed: Bool {
-        snapshot.sources.contains { $0.level > Self.captureConfirmDB }
-    }
-
     func refreshOutputVolume() async {
         guard !restoringVolume else { return }
         guard let uid = systemOutputUID else { return }
         guard guardedOutputs[uid] == nil else { return }
-        if let v = await engine.outputVolume(uid: uid) { outputVolume = Double(v) }
+        let requested = requestedOutputVolumes[uid]
+        guard let v = await engine.outputVolume(uid: uid),
+              systemOutputUID == uid, !restoringVolume, guardedOutputs[uid] == nil,
+              requestedOutputVolumes[uid] == requested else { return }
+        outputVolume = Double(v)
     }
 
     func dimOutputForExit() {
@@ -309,45 +335,31 @@ extension ConsoleViewModel {
         return true
     }
 
+    func stageSavedOutputVolume() {
+        guard driverEnabled, let uid = systemOutputUID, requestedOutputVolumes[uid] == nil,
+              defaults.object(forKey: Self.savedVolumeKey) != nil else { return }
+        let saved = defaults.double(forKey: Self.savedVolumeKey)
+        guard saved.isFinite else { return }
+        requestedOutputVolumes[uid] = Float(max(0, min(1, saved)))
+    }
+
     func restoreOutputVolume() async {
-        let generation = routerWorkGeneration
-        guard let uid = systemOutputUID else { return }
         guard driverEnabled else {
             await refreshOutputVolume()
             bamVolumeApplied = false
             return
         }
-        let saved = defaults.object(forKey: Self.savedVolumeKey) != nil
-            ? defaults.double(forKey: Self.savedVolumeKey) : nil
-
-        switch VolumePolicy.launch(savedLevel: saved) {
-        case .takeAuthorityNoChange:
-            await refreshOutputVolume()
-            bamVolumeApplied = true
-        case let .applySaved(v):
-            AppLog.router.notice("hardware volume launch target=\(v, privacy: .public) generation=\(generation, privacy: .public)")
-            restoringVolume = true
-            defer { restoringVolume = false }
-            if driverEnabled {
-                var held = 0
-                while held < 5, !Task.isCancelled {
-                    guard driverEnabled, generation == routerWorkGeneration else { return }
-                    held = captureConfirmed ? held + 1 : 0
-                    try? await Task.sleep(for: .milliseconds(50))
-                }
-                if Task.isCancelled { return }
-            }
-            guard driverEnabled, generation == routerWorkGeneration,
-                  guardedOutputs[uid] == nil, !routerStatus.isFailure else { return }
-            await enqueueRouterWork { model in
-                guard generation == model.routerWorkGeneration,
-                      model.guardedOutputs[uid] == nil, !model.routerStatus.isFailure else { return }
-                model.bamVolumeApplied = await model.rampOutputVolume(uid: uid, from: 0, to: v)
-            }.value
-        }
+        guard !bamVolumeApplied else { return }
+        stageSavedOutputVolume()
+        await enqueueRouterWork { model in
+            let generation = model.routerWorkGeneration
+            let status = await model.startRouterGuarded(config: model.config)
+            guard !Task.isCancelled, generation == model.routerWorkGeneration else { return }
+            model.applyRouterStatus(status)
+        }.value
     }
 
-    private func rampOutputVolume(uid: String, from: Double, to: Double) async -> Bool {
+    private func rampOutputVolume(uid: String, from: Double, to: Double, intentUID: String? = nil) async -> Bool {
         AppLog.router.notice("hardware volume ramp from=\(from, privacy: .public) target=\(to, privacy: .public) uid=\(uid, privacy: .private)")
         let generation = routerWorkGeneration
         let initialState: OutputDeviceState
@@ -372,6 +384,9 @@ extension ConsoleViewModel {
         let stepDelay = Duration.milliseconds(50)
         for i in 1...steps {
             if Task.isCancelled || generation != routerWorkGeneration { return false }
+            if let intentUID, let target = requestedOutputVolumes[systemOutputUID == uid ? uid : intentUID] {
+                guardedOutputs[uid]?.volume = target
+            }
             let target = Double(guardedOutputs[uid]?.volume ?? rampOutputTargets[uid] ?? Float(to))
             if config.masterMuted || guardedOutputs[uid]?.muted == true {
                 guard await engine.setOutputMutedChecked(uid: uid, true) == .applied,
@@ -383,6 +398,9 @@ extension ConsoleViewModel {
             do { try await outputRampSleep(stepDelay) } catch { return false }
         }
         guard !Task.isCancelled, generation == routerWorkGeneration else { return false }
+        if let intentUID, let target = requestedOutputVolumes[systemOutputUID == uid ? uid : intentUID] {
+            guardedOutputs[uid]?.volume = target
+        }
         let target = Double(guardedOutputs[uid]?.volume ?? rampOutputTargets[uid] ?? Float(to))
         guard await write(Float(target)) else { return false }
         return true
@@ -445,15 +463,29 @@ extension ConsoleViewModel {
                     model.applyRouterStatus(model.outputProtectionFailed())
                     continue
                 }
-                if uid == model.systemOutputUID { model.outputVolume = Double(state.volume) }
+                if uid == model.systemOutputUID, model.requestedOutputVolumes[uid] == volume {
+                    model.outputVolume = Double(state.volume)
+                }
             }
             for uid in targets.muteUIDs {
                 guard !Task.isCancelled else { return }
-                if model.guardedOutputs[uid] == nil, !model.config.masterMuted {
+                guard model.guardedOutputs[uid] == nil else {
+                    AppLog.router.notice("hardware unmute deferred; output protection retained uid=\(uid, privacy: .private)")
+                    continue
+                }
+                if !model.config.masterMuted {
                     guard let current = await model.captureOutputState(uid: uid) else { continue }
-                    guard model.guardedOutputs[uid] == nil, !model.config.masterMuted, !Task.isCancelled else { continue }
-                    let state = model.outputCalibrations[uid] ?? current
-                    _ = await model.engine.restoreOutputDeviceState(state, restoreVolume: false, restoreMute: true)
+                    guard model.guardedOutputs[uid] == nil else {
+                        AppLog.router.notice("hardware unmute deferred; output protection retained uid=\(uid, privacy: .private)")
+                        continue
+                    }
+                    guard !model.config.masterMuted, !Task.isCancelled else { continue }
+                    let state = Self.outputStateWithMasterUnmuted(model.outputCalibrations[uid] ?? current)
+                    guard await model.engine.restoreOutputDeviceState(state, restoreVolume: false, restoreMute: true) == .applied else {
+                        AppLog.router.error("hardware unmute failed uid=\(uid, privacy: .private)")
+                        model.applyRouterStatus(model.outputProtectionFailed())
+                        continue
+                    }
                 }
             }
         }

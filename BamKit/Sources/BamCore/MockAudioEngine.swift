@@ -35,16 +35,24 @@ public actor MockAudioEngine: AudioEngineProtocol {
 
     public func defaultOutputUID() -> String? { "MockOutput" }
 
+    private var resolvedOutputUID: String?
+    public func setResolvedOutputUIDForTests(_ uid: String) { resolvedOutputUID = uid }
+
     public func boundOutputUID() -> String? {
-        routerConfig?.mixes.compactMap { if case .hardware(let uid) = $0.dest { uid } else { nil } }.first ?? "MockOutput"
+        resolvedOutputUID ?? routerConfig?.mixes.compactMap { if case .hardware(let uid) = $0.dest { uid } else { nil } }.first ?? "MockOutput"
     }
     public func routerOutputUIDs(config: BamConfig) async -> Set<String> {
+        if let resolvedOutputUID { return [resolvedOutputUID] }
         let uids = Set(config.mixes.compactMap { if case .hardware(let uid) = $0.dest { uid } else { nil } })
         return uids.isEmpty ? ["MockOutput"] : uids
     }
 
     private var mockVolumes: [String: Float] = [:]
     private var mockDeviceStates: [String: OutputDeviceState] = [:]
+    private var outputVolumeReadHook: (@Sendable () async -> Void)?
+    private var outputVolumeRestoreHook: (@Sendable () async -> Void)?
+    public func setOutputVolumeReadHookForTests(_ hook: @escaping @Sendable () async -> Void) { outputVolumeReadHook = hook }
+    public func setOutputVolumeRestoreHookForTests(_ hook: @escaping @Sendable () async -> Void) { outputVolumeRestoreHook = hook }
     public func setOutputDeviceStateForTests(_ state: OutputDeviceState) { mockDeviceStates[state.uid] = state }
     public func outputDeviceState(uid: String) async -> OutputDeviceState? {
         mockDeviceStates[uid] ?? OutputDeviceState(uid: uid, deviceID: 1,
@@ -68,9 +76,20 @@ public actor MockAudioEngine: AudioEngineProtocol {
             mockMutes[state.uid] = state.muted
         }
         mockDeviceStates[state.uid] = current
+        if restoreVolume, let hook = outputVolumeRestoreHook {
+            outputVolumeRestoreHook = nil
+            await hook()
+        }
         return .applied
     }
-    public func outputVolume(uid: String) -> Float? { mockDeviceStates[uid]?.volume ?? mockVolumes[uid] ?? 0.8 }
+    public func outputVolume(uid: String) async -> Float? {
+        let volume = mockDeviceStates[uid]?.volume ?? mockVolumes[uid] ?? 0.8
+        if let hook = outputVolumeReadHook {
+            outputVolumeReadHook = nil
+            await hook()
+        }
+        return volume
+    }
     public func setOutputVolume(uid: String, _ volume: Float) {
         let clamped = max(0, min(1, volume))
         calls.append(.setOutputVolume(uid: uid, volume: clamped))

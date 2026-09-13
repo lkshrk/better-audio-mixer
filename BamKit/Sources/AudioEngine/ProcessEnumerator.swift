@@ -25,15 +25,15 @@ enum ProcessEnumerator {
         )
     }
 
-    static func info(for object: AudioObjectID) -> AudioProcessInfo? {
+    static func info(for object: AudioObjectID, includeDeviceIDs: Bool = false) -> AudioProcessInfo? {
         let pidVal = CA.value(
             object, CA.address(kAudioProcessPropertyPID), default: pid_t(-1)
         )
         let bundleID = CA.cfString(object, CA.address(kAudioProcessPropertyBundleID)) ?? ""
         let running = CA.uint32(object, CA.address(kAudioProcessPropertyIsRunningOutput)) != 0
-        let devices: [AudioObjectID] = CA.array(
+        let devices: [AudioObjectID] = includeDeviceIDs ? CA.array(
             object, CA.address(kAudioProcessPropertyDevices), of: AudioObjectID.self
-        )
+        ) : []
         return AudioProcessInfo(
             objectID: object,
             pid: pidVal,
@@ -43,8 +43,22 @@ enum ProcessEnumerator {
         )
     }
 
-    static func allProcesses() -> [AudioProcessInfo] {
-        processObjectIDs().compactMap(info(for:))
+    static func allProcesses(includeDeviceIDs: Bool = false) -> [AudioProcessInfo] {
+        processObjectIDs().compactMap { info(for: $0, includeDeviceIDs: includeDeviceIDs) }
+    }
+
+    static func playingBundleIDs() -> Set<String> {
+        activeBundleIDs(processObjectIDs(), isRunning: {
+            CA.uint32($0, CA.address(kAudioProcessPropertyIsRunningOutput)) != 0
+        }, bundleID: { CA.cfString($0, CA.address(kAudioProcessPropertyBundleID)) })
+    }
+
+    static func activeBundleIDs(_ ids: [AudioObjectID], isRunning: (AudioObjectID) -> Bool,
+                                bundleID: (AudioObjectID) -> String?) -> Set<String> {
+        Set(ids.compactMap { id in
+            guard isRunning(id), let bundle = bundleID(id), !bundle.isEmpty else { return nil }
+            return bundle
+        })
     }
 
     /// Resolve a live PID to its CoreAudio process object. Works even before the
@@ -119,7 +133,7 @@ enum ProcessEnumerator {
     /// should each get their own tap chain.
     static func resolve(bundleIDs: Set<String>) -> [(process: AudioProcessInfo, device: OutputDeviceInfo)] {
         var pairs: [(AudioProcessInfo, OutputDeviceInfo)] = []
-        for proc in allProcesses() where bundleIDs.contains(proc.bundleID) {
+        for proc in allProcesses(includeDeviceIDs: true) where bundleIDs.contains(proc.bundleID) {
             for devID in proc.deviceIDs {
                 if let dev = device(for: devID) {
                     pairs.append((proc, dev))

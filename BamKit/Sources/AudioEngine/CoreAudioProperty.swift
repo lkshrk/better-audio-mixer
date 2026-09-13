@@ -21,13 +21,17 @@ enum CA {
             let result = lock.withLock {
                 let key = Device(uid: uid, id: device)
                 if uncertain.contains(key) {
+                    engineLog.error("hardware write blocked by an earlier unconfirmed request device=\(device, privacy: .public) protectingMute=\(protectingMute, privacy: .public)")
                     if protectingMute { _ = confirm(true, {}) }
                     // Best-effort protection cannot cancel an older pending write.
                     return false
                 }
                 var accepted = false
                 let confirmed = confirm(false, { accepted = true })
-                if !protectingMute && accepted && !confirmed { uncertain.insert(key) }
+                if !protectingMute && accepted && !confirmed {
+                    engineLog.error("hardware write accepted but unconfirmed; retaining protection device=\(device, privacy: .public)")
+                    uncertain.insert(key)
+                }
                 return confirmed
             }
             // A failed live volume control may start unmuted. Its protection must

@@ -116,6 +116,31 @@ final class RouterSafetyConcurrencyTests: XCTestCase {
         await model.stop()
     }
 
+    func testExplicitMasterUnmuteClearsWholeDeviceMuteCapturedAfterFailure() async {
+        let mock = MockAudioEngine()
+        let model = await makeModel(mock)
+        let muted = OutputDeviceState(uid: "MockOutput", deviceID: 1,
+                                      volumes: [0: 0.12], mutes: [0: true])
+        await mock.setOutputDeviceStateForTests(muted)
+        model.outputCalibrations["MockOutput"] = muted
+        model.setMasterMuted(false)
+        await model.enqueueRouterWork { _ in }.value
+        let physicalMute = await mock.outputMuted(uid: "MockOutput")
+        XCTAssertFalse(physicalMute)
+        XCTAssertEqual(model.outputCalibrations["MockOutput"]?.mutes, [0: true], "stock calibration remains available for exact exit restoration")
+        await model.stop()
+    }
+
+    func testGuardedMasterUnmutePreservesPartialMuteButReleasesGlobalMute() {
+        for mutes in [[UInt32(1): true, 2: true], [UInt32(1): false, 2: true]] {
+            let original = OutputDeviceState(uid: "device", deviceID: 1, volumes: [0: 0.12], mutes: mutes)
+            var guarded = ConsoleViewModel.GuardedOutput(state: original, calibration: original)
+            guarded.muted = false
+            XCTAssertEqual(guarded.state.mutes, original.muted ? mutes.mapValues { _ in false } : mutes)
+            XCTAssertEqual(guarded.calibration.mutes, mutes)
+        }
+    }
+
     func testFailedLiveVolumeChangeMutesAndSurfacesFailure() async {
         let mock = MockAudioEngine()
         let model = await makeModel(mock)
@@ -223,22 +248,44 @@ final class RouterSafetyConcurrencyTests: XCTestCase {
         await model.stop()
     }
 
-    func testStartupFadeUsesNewUserTargetWithoutReplayingSavedVolume() async {
-        defaults.set(0.42, forKey: ConsoleViewModel.savedVolumeKey)
+    func testFailedExplicitUnmuteReportsOutputProtectionFailure() async {
         let mock = MockAudioEngine()
         let model = await makeModel(mock)
-        var ticks = 0
-        model.outputRampSleep = { [weak model] _ in
-            ticks += 1
-            if ticks == 1 { model?.setOutputVolume(0.17) }
-            await Task.yield()
+        model.setMasterMuted(true)
+        let muted = await eventually { await mock.outputMuted(uid: "MockOutput") }
+        XCTAssertTrue(muted)
+        await model.enqueueRouterWork { _ in }.value
+        await mock.setCheckedWriteResults(mute: .failed)
+
+        model.setMasterMuted(false)
+        await model.enqueueRouterWork { _ in }.value
+
+        XCTAssertEqual(model.routerStatus.cause, .buildFailed)
+        XCTAssertNotNil(model.error)
+        let hardwareMuted = await mock.outputMuted(uid: "MockOutput")
+        XCTAssertTrue(hardwareMuted)
+        await mock.setCheckedWriteResults()
+        await model.stop()
+    }
+
+    func testStartupAppliesNewerTargetBeforeUnmuteWithoutHardwareRamp() async {
+        defaults.set(0.42, forKey: ConsoleViewModel.savedVolumeKey)
+        let mock = MockAudioEngine(silentRouter: true)
+        let model = ConsoleViewModel(engine: mock, defaults: defaults)
+        await mock.setOutputVolumeRestoreHookForTests { @MainActor in
+            model.setOutputVolume(0.17)
         }
-        await model.restoreOutputVolume()
+        await model.startMock(config: BamConfig())
         await model.enqueueRouterWork { _ in }.value
         let calls = await mock.calls
-        XCTAssertFalse(calls.contains(.setOutputVolume(uid: "MockOutput", volume: 0.42)))
+        let newVolumeIndex = calls.firstIndex(of: .setOutputVolume(uid: "MockOutput", volume: 0.17))!
+        let unmuteIndex = calls.firstIndex(of: .setOutputMuted(uid: "MockOutput", muted: false))!
+        XCTAssertLessThan(newVolumeIndex, unmuteIndex)
+        XCTAssertFalse(calls.contains(.setOutputVolume(uid: "MockOutput", volume: 0)))
+        XCTAssertFalse(calls.contains(.setOutputVolume(uid: "MockOutput", volume: 1)))
         let volume = await mock.outputVolume(uid: "MockOutput")
         XCTAssertEqual(volume ?? -1, 0.17, accuracy: 0.0001)
+        XCTAssertEqual(model.outputVolume, 0.17, accuracy: 0.0001)
         await model.stop()
     }
 
@@ -283,6 +330,64 @@ final class RouterSafetyConcurrencyTests: XCTestCase {
         XCTAssertEqual(capped?.volumes[1] ?? -1, 1 / 3, accuracy: 0.0001)
         XCTAssertEqual(capped?.volumes[2] ?? -1, 1, accuracy: 0.0001)
         XCTAssertEqual(capped?.mutes, original.mutes)
+        await model.stop()
+    }
+
+    func testCompletedVolumeWriteDoesNotReplaceNewerFaderTarget() async {
+        let mock = MockAudioEngine()
+        let model = await makeModel(mock)
+        await mock.setOutputVolumeRestoreHookForTests { @MainActor in
+            model.setOutputVolume(0.7)
+        }
+        model.setOutputVolume(0.2)
+        // This barrier runs after the old write, before the hook's newer write.
+        var displayedAfterOldWrite = 0.0
+        await model.enqueueRouterWork { model in
+            displayedAfterOldWrite = model.outputVolume
+        }.value
+        XCTAssertEqual(displayedAfterOldWrite, 0.7, accuracy: 0.0001)
+        await model.enqueueRouterWork { _ in }.value
+        let hardware = await mock.outputVolume(uid: "MockOutput")
+        XCTAssertEqual(hardware ?? -1, 0.7, accuracy: 0.0001)
+        await model.stop()
+    }
+
+    func testVolumeReadbackDiscardsStateInvalidatedWhileReading() async {
+        for change in ["target", "output", "guard", "restore"] {
+            let mock = MockAudioEngine()
+            let model = await makeModel(mock)
+            await mock.setOutputVolumeReadHookForTests { @MainActor in
+                switch change {
+                case "target": model.setOutputVolume(0.7)
+                case "output":
+                    let index = model.config.mixes.firstIndex { $0.id == ConsoleViewModel.defaultMixID }!
+                    model.config.mixes[index].dest = .hardware(uid: "OtherOutput")
+                case "guard":
+                    let state = OutputDeviceState(uid: "MockOutput", deviceID: 1,
+                                                  volumes: [0: 0.42], mutes: [0: false])
+                    model.guardedOutputs["MockOutput"] = ConsoleViewModel.GuardedOutput(state: state, calibration: state)
+                default: model.restoringVolume = true
+                }
+            }
+            await model.refreshOutputVolume()
+            XCTAssertEqual(model.outputVolume, change == "target" ? 0.7 : 0.42,
+                           accuracy: 0.0001, "stale read after \(change)")
+            model.restoringVolume = false
+            await model.stop()
+        }
+    }
+
+    func testCompletedVolumeWriteDoesNotReplaceChangedOutputDisplay() async {
+        let mock = MockAudioEngine()
+        let model = await makeModel(mock)
+        await mock.setOutputVolumeRestoreHookForTests { @MainActor in
+            let index = model.config.mixes.firstIndex { $0.id == ConsoleViewModel.defaultMixID }!
+            model.config.mixes[index].dest = .hardware(uid: "OtherOutput")
+            model.outputVolume = 0.6
+        }
+        model.setOutputVolume(0.2)
+        await model.enqueueRouterWork { _ in }.value
+        XCTAssertEqual(model.outputVolume, 0.6, accuracy: 0.0001)
         await model.stop()
     }
 

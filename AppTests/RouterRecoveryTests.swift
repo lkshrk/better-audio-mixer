@@ -166,22 +166,44 @@ final class RouterRecoveryTests: XCTestCase {
         await model.stop()
     }
 
-    func testBuildFailedRecoversViaHeartbeat() async {
+    func testBuildFailedIgnoresRepeatedHALEventsAndRecoversViaHeartbeat() async {
         let mock = MockAudioEngine()
         await mock.scriptRouterStatuses([
             RouterStatus(failedMixIDs: ["m0"], cause: .buildFailed),
             .ok,
         ])
         let model = ConsoleViewModel(engine: mock, defaults: defaults)
+        var releaseHeartbeat = false
+        var delays: [Duration] = []
+        model.recoverySleep = { delay in
+            delays.append(delay)
+            while !releaseHeartbeat {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
         await model.startMock(config: config())
 
         XCTAssertEqual(model.failedMixIDs, ["m0"])
         XCTAssertEqual(model.routerStatus.cause, .buildFailed)
         XCTAssertEqual(model.routerStatusMessage, "Audio engine couldn't start — retrying automatically.")
 
-        let healed = await eventually(4.0) { model.failedMixIDs.isEmpty }
+        // Aggregate teardown can generate these events itself. None may bypass
+        // the pending heartbeat, even when the next scripted build would succeed.
+        for _ in 0..<10 {
+            await mock.emitRouterEvent()
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        let callsBeforeHeartbeat = await mock.startRouterCalls
+        XCTAssertEqual(callsBeforeHeartbeat, 1)
+        XCTAssertEqual(model.routerStatus.cause, .buildFailed)
+        XCTAssertEqual(delays, [.seconds(2)])
+
+        releaseHeartbeat = true
+        let healed = await eventually { model.failedMixIDs.isEmpty }
         XCTAssertTrue(healed, "buildFailed heartbeat should retry and recover")
         XCTAssertEqual(model.routerStatus.cause, .ok)
+        let callsAfterHeartbeat = await mock.startRouterCalls
+        XCTAssertEqual(callsAfterHeartbeat, 2)
         await model.stop()
     }
 

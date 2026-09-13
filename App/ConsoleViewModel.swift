@@ -139,11 +139,11 @@ final class ConsoleViewModel {
             config = Self.normalize(Self.seedConfig(), defaultOutput: defaultOutputUID)
         }
         if activeMixID == nil { activeMixID = config.mixes.first?.id }
+        stageSavedOutputVolume()
         await captureStockVolume()
         // startRouterGuarded owns setup protection and restores only a safe route.
         await subscribe()
         startControlServer()
-        await restoreOutputVolume()
     }
 
     /// Stand up the Stream Deck control socket and feed it the current snapshot at
@@ -180,6 +180,7 @@ final class ConsoleViewModel {
         defaultOutputUID = await engine.defaultOutputUID()
         self.config = Self.normalize(config, defaultOutput: defaultOutputUID)
         activeMixID = self.config.mixes.first?.id
+        stageSavedOutputVolume()
         await captureStockVolume()
         await subscribe()
     }
@@ -350,13 +351,16 @@ final class ConsoleViewModel {
             let events = await self.engine.routerEvents()
             for await _ in events {
                 guard !Task.isCancelled, self.driverEnabled else { return }
-                AppLog.router.debug("router event received; reconciling")
+                AppLog.router.debug("router event received")
                 // Reflect device add/remove in the picker immediately instead of
                 // waiting on the 2s poll.
                 self.outputDevices = await self.engine.outputDevices()
                 // Await the queued pass so the newest-only stream bounds pending
                 // invalidations instead of turning each one into another Task.
                 await self.enqueueRouterWork { model in
+                    // Failed builds create their own HAL device events during teardown.
+                    // Let the heartbeat retry; hardware changes can wait at most 30s.
+                    guard model.routerStatus.cause != .buildFailed else { return }
                     let checkedConfig = model.config
                     let unchanged = await model.engine.canKeepCurrentRouter(config: checkedConfig)
                     guard !Task.isCancelled else { return }
@@ -449,16 +453,7 @@ final class ConsoleViewModel {
     /// (before bam touches the volume), restored on exit after teardown.
     static let stockVolumeKey = "bam.stockVolume"
 
-    /// dBFS bar a source must clear to count as *real* captured audio. The taps
-    /// deliver exact silence (level == floorDB, -120) until the capture-permission
-    /// grant lands; at -55 we're safely above any startup/denormal noise yet well
-    /// below normal program level (-30…-12), so this never false-positives on the
-    /// pre-permission silence that caused the launch volume spike.
-    static let captureConfirmDB: Float = -55
-
-    /// True while `restoreOutputVolume()` is holding the device dimmed waiting for
-    /// the capture-permission grant. The periodic poll must not surface that
-    /// transient dim on the fader — the fader should keep showing the user's level.
+    /// Prevent hardware polls from surfacing temporary protection levels.
     var restoringVolume = false
 
     struct GuardedOutput {
@@ -470,18 +465,14 @@ final class ConsoleViewModel {
         }
         var muted: Bool {
             get { state.muted }
-            set { state.mutes = newValue ? state.mutes.mapValues { _ in true } : calibration.mutes }
+            set { state.mutes = newValue ? state.mutes.mapValues { _ in true } : ConsoleViewModel.outputStateWithMasterUnmuted(calibration).mutes }
         }
     }
     // Keep user intent across failed rebuilds; HAL may reset the hardware to 100%.
     var guardedOutputs: [String: GuardedOutput] = [:]
 
-    /// True once this session has actually taken authority over the device volume —
-    /// i.e. `restoreOutputVolume()` ran to completion (applied the saved bam level,
-    /// or owned a fresh device with no saved level). Exit only persists the running
-    /// level / resets to stock when this is true; otherwise (capture never confirmed,
-    /// restore cancelled) it leaves the saved level untouched so a half-finished
-    /// session can't clobber it with a stock/dimmed reading.
+    /// Only successful protected startup takes authority over the device volume.
+    /// Failed startup leaves the previous session's saved level intact on exit.
     var bamVolumeApplied = false
 
     // MARK: apply
