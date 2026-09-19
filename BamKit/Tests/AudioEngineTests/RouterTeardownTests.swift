@@ -27,7 +27,7 @@ final class RouterTeardownTests: XCTestCase {
 
     func testCallbackOwnsFadeStateUntilSuccessfulCallbackDestruction() {
         var state: RouterAggregate.CallbackLifetime? = .init(taps: [])
-        weak let observedState = state
+        let observed = WeakRef(state)
         var retainedCallback: (() -> Int)? = { [state = state!] in
             state.played += 1
             return state.played
@@ -43,11 +43,11 @@ final class RouterTeardownTests: XCTestCase {
         resources.ioProcID = { _, _, _, _, _, _, _ in noErr }
         state = nil
         XCTAssertFalse(resources.close())
-        XCTAssertNotNil(observedState)
+        XCTAssertNotNil(observed.value)
         XCTAssertEqual(retainedCallback?(), 1)
         fail = false
         XCTAssertTrue(resources.close())
-        XCTAssertNil(observedState)
+        XCTAssertNil(observed.value)
     }
 
     func testEachFailureRetainsItsHandleAndRetryResumesAtFailedStage() {
@@ -107,4 +107,9 @@ final class RouterTeardownTests: XCTestCase {
         fail = false
         XCTAssertTrue(router.close())
     }
+}
+
+private final class WeakRef<T: AnyObject> {
+    weak var value: T?
+    init(_ value: T?) { self.value = value }
 }

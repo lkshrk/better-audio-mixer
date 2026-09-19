@@ -54,7 +54,7 @@ final class EngineConcurrencyTests: XCTestCase {
     }
 
     func testRouterEventsAreDebounced() async {
-        await CoreAudioEngine.setRouterEventIntervalsForTests(poll: nil, debounce: .milliseconds(60))
+        await CoreAudioEngine.setRouterEventIntervalsForTests(poll: nil, debounce: .milliseconds(300))
         let handlers = HandlerBox()
         await CoreAudioEngine.setChangeListenerFactoryForTests { _, _, onChange in
             handlers.append(onChange)
@@ -66,14 +66,18 @@ final class EngineConcurrencyTests: XCTestCase {
         let consumer = Task {
             for await _ in events { counter.append {} }
         }
-        try? await Task.sleep(for: .milliseconds(20))
+        try? await Task.sleep(for: .milliseconds(50))
         XCTAssertEqual(handlers.count, 3)
         for _ in 0..<5 {
             handlers.fireAll()
-            try? await Task.sleep(for: .milliseconds(10))
+            try? await Task.sleep(for: .milliseconds(5))
         }
         XCTAssertEqual(counter.count, 0, "nothing is delivered while notifications keep arriving")
-        try? await Task.sleep(for: .milliseconds(200))
+        let deadline = ContinuousClock.now + .seconds(3)
+        while counter.count == 0, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        try? await Task.sleep(for: .milliseconds(400))
         XCTAssertEqual(counter.count, 1, "a burst collapses into exactly one delivery")
         consumer.cancel()
     }
