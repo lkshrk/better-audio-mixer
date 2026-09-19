@@ -108,7 +108,7 @@ public final class MockMixerControl: MixerControl {
     public func setOutputDevice(uid: String) -> Bool {
         calls.append(.setOutputDevice(uid: uid))
         guard outputSwitchSupported else { return false }
-        outputs = outputs.map { OutputSnapshot(uid: $0.uid, name: $0.name, active: $0.uid == uid) }
+        outputs = outputs.map { OutputSnapshot(uid: $0.uid, name: $0.name, active: $0.uid == uid, icon: $0.icon) }
         return true
     }
 

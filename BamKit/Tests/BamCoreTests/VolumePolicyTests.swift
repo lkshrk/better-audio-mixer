@@ -2,7 +2,7 @@ import Testing
 @testable import BamCore
 
 @Suite struct VolumePolicyTests {
-    // MARK: exit — clobber guard (bug-144)
+    // MARK: exit — clobber guard
 
     @Test func exitWithoutAuthorityPersistsNothing() {
         // The core regression: a session that never confirmed capture must tear

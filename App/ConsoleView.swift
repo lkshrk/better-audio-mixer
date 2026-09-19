@@ -4,8 +4,6 @@ import SwiftUI
 struct ConsoleView: View {
     @Bindable var model: ConsoleViewModel
 
-    private var t: Theme { .make(dark: model.dark) }
-
     var body: some View {
         VStack(spacing: 0) {
             TopBar()
@@ -16,27 +14,35 @@ struct ConsoleView: View {
             }
         }
         .ignoresSafeArea(.container, edges: .top)
-        .background(t.bg.ignoresSafeArea())
-        .environment(\.theme, t)
+        .background(Theme.standard.bg.ignoresSafeArea())
+        .environment(\.theme, Theme.standard)
         .focusEffectDisabled()
-        .preferredColorScheme(model.dark ? .dark : .light)
+        .preferredColorScheme(.dark)
         .overlay(alignment: .bottom) {
-            if let err = model.error {
-                Label(err, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 12).padding(.vertical, 8)
-                    .background(.red.opacity(0.85), in: Capsule())
-                    .padding(.bottom, 14)
+            VStack(spacing: 6) {
+                if let warning = model.configWarning {
+                    banner(warning, tint: Theme.warning)
+                }
+                if let err = model.error {
+                    banner(err, tint: .red)
+                }
             }
+            .padding(.bottom, 14)
         }
+    }
+
+    private func banner(_ text: String, tint: Color) -> some View {
+        Label(text, systemImage: "exclamationmark.triangle.fill")
+            .font(.caption)
+            .foregroundStyle(.white)
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .background(tint.opacity(0.85), in: Capsule())
     }
 }
 
 // MARK: - Top bar
 
-/// Slim custom bar drawn into the full-size content area; the macOS traffic
-/// lights float over its left inset. Brand left, system-output picker right.
+/// Slim bar drawn into the full-size content area; the traffic lights float over its left inset.
 private struct TopBar: View {
     @Environment(\.theme) private var t
 
@@ -49,10 +55,13 @@ private struct TopBar: View {
                 .font(.system(size: 12, weight: .semibold)).tracking(-0.1)
                 .foregroundStyle(t.text)
             Spacer(minLength: 16)
+            Text(verbatim: "v" + AppDelegate.shortVersion)
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundStyle(t.faint)
         }
         .padding(.leading, 78)
         .padding(.trailing, 16)
-        .frame(height: 38)
+        .frame(height: Tuning.titleBarHeight)
         .background(t.bar)
         .overlay(alignment: .bottom) { Rectangle().fill(t.line).frame(height: 1) }
     }

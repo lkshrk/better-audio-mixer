@@ -38,4 +38,11 @@ import Foundation
         #expect(abs(RMSMeter.fraction(dbFS: 0, minDB: -60) - 1) < 0.001)
         #expect(abs(RMSMeter.fraction(dbFS: -30, minDB: -60) - 0.5) < 0.001)
     }
+
+    @Test func fractionWithNonNegativeFloorNeverProducesNaN() {
+        #expect(RMSMeter.fraction(dbFS: -10, minDB: 0) == 0)
+        #expect(RMSMeter.fraction(dbFS: 0, minDB: 0) == 1)
+        #expect(RMSMeter.fraction(dbFS: 3, minDB: 5) == 1)
+        #expect(!RMSMeter.fraction(dbFS: -10, minDB: 5).isNaN)
+    }
 }

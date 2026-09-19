@@ -218,6 +218,7 @@ public actor MockAudioEngine: AudioEngineProtocol {
 
     public func routerSnapshots() -> AsyncStream<RouterSnapshot> {
         AsyncStream { continuation in
+            self.routerTask?.cancel()
             let t = Task { [weak self] in
                 var phase: Float = 0
                 while !Task.isCancelled {

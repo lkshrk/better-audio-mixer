@@ -4,10 +4,6 @@ import Foundation
 extension ConsoleViewModel {
     // MARK: live meters
 
-    func sourceLevel(_ id: String) -> Float {
-        snapshot.sources.first { $0.id == id }?.level ?? RMSMeter.floorDB
-    }
-
     func mixLevel(_ id: String) -> Float {
         snapshot.mixes.first { $0.id == id }?.level ?? RMSMeter.floorDB
     }
@@ -20,67 +16,15 @@ extension ConsoleViewModel {
         snapshot.mixes.first { $0.id == id }?.levelRight ?? mixLevel(id)
     }
 
-    // MARK: mix CRUD
-
-    func selectMix(_ id: String) { activeMixID = id }
-
-    func addMix() {
-        let slot = nextFreeSlot()
-        let id = Self.uniqueID("mix", existing: config.mixes.map(\.id))
-        let mix = Mix(id: id, name: "Mix \(config.mixes.count + 1)",
-                      dest: .virtualSlot(slot), tone: Palette.hue(for: id))
-        applyTopology { $0.mixes.append(mix) }
-        activeMixID = id
-    }
-
-    func deleteMix(_ id: String) {
-        applyTopology { $0.mixes.removeAll { $0.id == id } }
-        if activeMixID == id { activeMixID = config.mixes.first?.id }
-    }
-
-    func renameMix(_ id: String, to name: String) {
-        let t = name.trimmingCharacters(in: .whitespaces)
-        guard !t.isEmpty else { return }
-        applyGains { if let i = $0.mixes.firstIndex(where: { $0.id == id }) { $0.mixes[i].name = t } }
-    }
-
-    func setMixMaster(_ id: String, _ level: Double) {
-        applyGains { if let i = $0.mixes.firstIndex(where: { $0.id == id }) { $0.mixes[i].level = level } }
-    }
+    func mixPeakLeft(_ id: String) -> Float { mixPeaks[id]?.left.peak ?? RMSMeter.floorDB }
+    func mixPeakRight(_ id: String) -> Float { mixPeaks[id]?.right.peak ?? RMSMeter.floorDB }
+    var masterPeakLeft: Float { masterPeak.left.peak }
+    var masterPeakRight: Float { masterPeak.right.peak }
 
     // MARK: sends (routing within a mix)
 
-    func isRouted(_ sourceID: String, in mixID: String) -> Bool {
-        config.mixes.first { $0.id == mixID }?.sends.contains { $0.source == sourceID } ?? false
-    }
-
     func send(_ sourceID: String, in mixID: String) -> Send? {
         config.mixes.first { $0.id == mixID }?.sends.first { $0.source == sourceID }
-    }
-
-    func setRouted(_ sourceID: String, in mixID: String, _ routed: Bool) {
-        applyTopology { cfg in
-            guard let i = cfg.mixes.firstIndex(where: { $0.id == mixID }) else { return }
-            if routed {
-                for mi in cfg.mixes.indices {
-                    cfg.mixes[mi].sends.removeAll { $0.source == sourceID }
-                }
-                if !cfg.mixes[i].sends.contains(where: { $0.source == sourceID }) {
-                    cfg.mixes[i].sends.append(Send(source: sourceID))
-                }
-            } else {
-                cfg.mixes[i].sends.removeAll { $0.source == sourceID }
-            }
-        }
-    }
-
-    func setSendLevel(_ sourceID: String, in mixID: String, _ level: Double) {
-        applyGains { cfg in
-            if let i = cfg.mixes.firstIndex(where: { $0.id == mixID }),
-               let j = cfg.mixes[i].sends.firstIndex(where: { $0.source == sourceID }) {
-                cfg.mixes[i].sends[j].level = level
-            }
-        }
     }
 
     func setSendMuted(_ sourceID: String, in mixID: String, _ muted: Bool) {
@@ -97,50 +41,14 @@ extension ConsoleViewModel {
     /// Every running app is selectable in every device; assigning moves it.
     var assignableApps: [AudioApp] { runningApps }
 
-    func addSource(app: AudioApp) {
-        let id = Self.uniqueID("src", existing: config.sources.map(\.id))
-        applyTopology { cfg in
-            let src = Source(id: id, name: app.displayName, kind: .app,
-                             bundleIDs: [app.bundleID], hue: Palette.hue(for: id))
-            cfg.sources.append(src)
-            // Route new sources into the active mix by default.
-            if let mixID = self.activeMixID, let mi = cfg.mixes.firstIndex(where: { $0.id == mixID }) {
-                cfg.mixes[mi].sends.append(Send(source: id))
-            }
-        }
-    }
-
-    func deleteSource(_ id: String) {
-        applyTopology { cfg in
-            cfg.sources.removeAll { $0.id == id }
-            for i in cfg.mixes.indices { cfg.mixes[i].sends.removeAll { $0.source == id } }
-            if cfg.solo == id { cfg.solo = nil }
-            cfg.pans[id] = nil
-        }
-        if openGroupID == id { openGroupID = nil }
-    }
-
     // MARK: source app membership (group panel)
 
-    /// The apps grouped under a source, resolved to display metadata.
     func apps(for source: Source) -> [SourceApp] {
         source.bundleIDs.map { bid in
             let live = runningApps.first { $0.bundleID == bid }
             return SourceApp(bundleID: bid,
                              name: live?.displayName ?? Self.prettyName(bid),
                              playing: playing.contains(bid))
-        }
-    }
-
-    func assignApp(_ app: AudioApp, to sourceID: String) {
-        applyTopology { cfg in
-            for si in cfg.sources.indices where cfg.sources[si].kind == .app {
-                cfg.sources[si].bundleIDs.removeAll { $0 == app.bundleID }
-            }
-            guard let i = cfg.sources.firstIndex(where: { $0.id == sourceID }) else { return }
-            if !cfg.sources[i].bundleIDs.contains(app.bundleID) {
-                cfg.sources[i].bundleIDs.append(app.bundleID)
-            }
         }
     }
 
@@ -158,8 +66,6 @@ extension ConsoleViewModel {
 
     // MARK: devices (a device = one virtual output mix + its app-group source)
 
-    /// Columns are output devices. Each maps to a `Mix`; its apps live in the
-    /// single `Source` that mix sends from.
     var devices: [Mix] { config.mixes }
 
     func isDefaultDevice(_ mixID: String) -> Bool { mixID == Self.defaultMixID }
@@ -170,7 +76,6 @@ extension ConsoleViewModel {
 
     func deviceApps(_ mixID: String) -> [SourceApp] {
         if isDefaultDevice(mixID) {
-            // Remainder device: every running app not claimed by an app-source.
             let claimed = Set(config.sources.filter { $0.kind == .app }.flatMap(\.bundleIDs))
             return runningApps.filter { !claimed.contains($0.bundleID) }
                 .map { SourceApp(bundleID: $0.bundleID, name: $0.displayName, playing: playing.contains($0.bundleID)) }
@@ -252,8 +157,7 @@ extension ConsoleViewModel {
         }
     }
 
-    /// Move an app to a device. Stripped from every app-source first; if the
-    /// target is the Default catch-all it just stays stripped (remainder routes it).
+    /// Moves an app to a device; the Default catch-all just leaves it stripped so the remainder routes it.
     func assignApp(_ app: AudioApp, toDevice mixID: String) {
         applyTopology { cfg in
             for i in cfg.sources.indices where cfg.sources[i].kind == .app {
@@ -277,7 +181,12 @@ extension ConsoleViewModel {
     func deviceLevel(_ mixID: String) -> Double {
         config.mixes.first { $0.id == mixID }?.level ?? 1.0
     }
-    func setDeviceLevel(_ mixID: String, _ level: Double) { setMixMaster(mixID, level) }
+
+    func setDeviceLevel(_ mixID: String, _ level: Double) {
+        applyGains { cfg in
+            if let i = cfg.mixes.firstIndex(where: { $0.id == mixID }) { cfg.mixes[i].level = level }
+        }
+    }
 
     func deviceMuted(_ mixID: String) -> Bool {
         guard let sid = deviceSourceID(mixID) else { return false }
@@ -287,12 +196,4 @@ extension ConsoleViewModel {
         guard let sid = deviceSourceID(mixID) else { return }
         setSendMuted(sid, in: mixID, muted)
     }
-
-    // MARK: solo + pan (global, gains-only)
-
-    var soloID: String? { config.solo }
-    func toggleSolo(_ id: String) { applyGains { $0.solo = ($0.solo == id) ? nil : id } }
-
-    func pan(_ id: String) -> Double { config.pans[id] ?? 0.5 }
-    func setPan(_ id: String, _ pan: Double) { applyGains { $0.pans[id] = pan } }
 }

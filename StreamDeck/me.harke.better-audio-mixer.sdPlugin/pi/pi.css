@@ -1,0 +1,8 @@
+body { margin: 8px 0 0; }
+sdpi-item, sdpi-select, sdpi-range, sdpi-checkbox {
+  --font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif;
+}
+.range { display: flex; align-items: center; }
+.range sdpi-range { flex: 1 1 auto; }
+.range .value { flex: 0 0 40px; text-align: right; color: #d8d8d8; font: 9pt -apple-system, BlinkMacSystemFont, sans-serif; }
+.hint { margin: 0; padding-top: 4px; color: #969696; font: 9pt -apple-system, BlinkMacSystemFont, sans-serif; line-height: 1.4; }

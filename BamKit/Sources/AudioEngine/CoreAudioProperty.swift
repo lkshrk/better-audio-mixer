@@ -19,8 +19,6 @@ enum CA {
             onFailure: () -> Void = {},
             confirm: (_ forceWrite: Bool, _ accepted: () -> Void) -> Bool
         ) -> Bool {
-            // ponytail: serialize control writes across devices; use per-device locks
-            // only if control-thread contention becomes material. Listener is independent.
             let result = lock.withLock {
                 let key = Device(uid: uid, id: device)
                 if let latched = uncertain[key] {
@@ -83,9 +81,7 @@ enum CA {
         // The state may have reached the target while the listener was installed.
         if !forceWrite && matches() { return isCurrent() }
         let deadline = DispatchTime.now() + timeout
-        // Discard notifications already observed before this request. HAL provides
-        // no request correlation; callers must serialize writes and retain uncertainty
-        // after timeout rather than treating a retry's notification as cancellation.
+        // HAL has no request correlation: drain notifications queued before this request.
         while signal.wait(timeout: .now()) == .success {
             if DispatchTime.now() >= deadline { return false }
         }
@@ -102,11 +98,9 @@ enum CA {
     static func volumeMatches(_ actual: Float?, target: Float) -> Bool {
         guard let actual, actual.isFinite, (0...1).contains(actual), target.isFinite else { return false }
         if actual == target { return true }
-        // Silence and unity are exact safety boundaries. Match each channel's
-        // requested calibration independently, including newly scaled calibrations.
+        // Silence and unity are exact safety boundaries.
         guard target > 0, target < 1 else { return false }
-        // ponytail: measured 12% writes can read 12.1502%; cap rounding acceptance at
-        // 0.2 percentage points AND 2% relative.
+        // Measured: a 12% write can read back 12.15%.
         return abs(actual - target) <= min(0.002, target * 0.02)
     }
 
@@ -119,6 +113,24 @@ enum CA {
         if actual == target { return true }
         guard target > 0, target < 1 else { return false }
         return abs(actual - target) <= volumeLandingTolerance
+    }
+
+    /// Channel count of every output buffer in the device's stream configuration.
+    static func outputBufferChannels(_ device: AudioObjectID) -> [Int]? {
+        var address = CA.address(kAudioDevicePropertyStreamConfiguration, kAudioDevicePropertyScopeOutput)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(device, &address, 0, nil, &size) == noErr,
+              size >= MemoryLayout<AudioBufferList>.size else { return nil }
+        let capacity = Int(size)
+        let memory = UnsafeMutableRawPointer.allocate(byteCount: capacity, alignment: MemoryLayout<AudioBufferList>.alignment)
+        defer { memory.deallocate() }
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, memory) == noErr,
+              Int(size) <= capacity, size >= MemoryLayout<AudioBufferList>.size else { return nil }
+        let list = memory.assumingMemoryBound(to: AudioBufferList.self)
+        let count = Int(list.pointee.mNumberBuffers)
+        guard count >= 0,
+              Int(size) >= MemoryLayout<AudioBufferList>.size + max(0, count - 1) * MemoryLayout<AudioBuffer>.stride else { return nil }
+        return UnsafeMutableAudioBufferListPointer(list).map { Int($0.mNumberChannels) }
     }
 
     static func uint32Value(_ object: AudioObjectID, _ addr: AudioObjectPropertyAddress) -> UInt32? {

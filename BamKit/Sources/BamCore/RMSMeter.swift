@@ -39,6 +39,7 @@ public enum RMSMeter {
     }
 
     public static func fraction(dbFS: Float, minDB: Float = -60.0) -> Float {
+        guard minDB < 0 else { return dbFS >= 0 ? 1 : 0 }
         guard dbFS > minDB else { return 0 }
         let clamped = min(dbFS, 0)
         return (clamped - minDB) / (0 - minDB)

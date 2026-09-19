@@ -3,7 +3,8 @@ import Foundation
 
 /// One Core Audio process tap. Owns the tap object's lifetime; reads its
 /// negotiated stream format so the aggregate and RMS loop know the layout.
-final class ProcessTap {
+/// Membership writes are serialized by the engine's router gate.
+final class ProcessTap: @unchecked Sendable {
     let tapID: AudioObjectID
     let uuid: String
     let format: AudioStreamBasicDescription
@@ -46,9 +47,7 @@ final class ProcessTap {
     /// Only membership is mutable here. The aggregate owns a frozen layout and
     /// still reads this same tap; failed confirmation must retain output mute.
     func update(description: CATapDescription) -> Bool {
-        // A timed-out accepted write can still arrive later. HAL notifications
-        // have no request IDs, so a subsequent matching read is not a rollback.
-        // Recovery must destroy this tap under protection before replacing it.
+        // A timed-out write may still land later; only a protected destroy clears the uncertainty.
         guard !membershipUncertain else { return false }
         description.uuid = originalDescription.uuid
         description.isPrivate = true

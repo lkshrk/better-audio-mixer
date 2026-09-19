@@ -16,7 +16,7 @@
   "OS": [
     {
       "Platform": "mac",
-      "MinimumVersion": "12"
+      "MinimumVersion": "14.4"
     }
   ],
   "ApplicationsToMonitor": {
@@ -39,14 +39,11 @@
         "layout": "layouts/channel.json",
         "TriggerDescription": {
           "Rotate": "Adjust volume",
-          "Push": "Mute"
+          "Push": "Mute",
+          "Touch": "Mute"
         }
       },
       "States": [
-        {
-          "Image": "icons/key",
-          "TitleAlignment": "bottom"
-        },
         {
           "Image": "icons/key",
           "TitleAlignment": "bottom"
@@ -67,14 +64,11 @@
         "layout": "layouts/channel.json",
         "TriggerDescription": {
           "Rotate": "Adjust master",
-          "Push": "Mute"
+          "Push": "Mute",
+          "Touch": "Mute"
         }
       },
       "States": [
-        {
-          "Image": "icons/key",
-          "TitleAlignment": "bottom"
-        },
         {
           "Image": "icons/key",
           "TitleAlignment": "bottom"

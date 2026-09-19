@@ -7,12 +7,18 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		1032121E6FF82B2280749426 /* PeakHoldTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C9AE8C107194442B4273A6B /* PeakHoldTests.swift */; };
 		22854C12B20885A8D5631E36 /* ConsoleViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 767CA954922083AFCB350404 /* ConsoleViewModel.swift */; };
 		292CE93EE2B46905FA328AE3 /* ConsoleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DD2D055563B514321429B1D /* ConsoleView.swift */; };
+		3BF17072ED7611E33DF19E0C /* ConsoleSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 385C8A345BD5D8824F5156BC /* ConsoleSnapshotTests.swift */; };
+		3FA31007D9AF5EA42B1FC40F /* AudioEngine in Frameworks */ = {isa = PBXBuildFile; productRef = C5F64AA36C7A253DD0EB7D7E /* AudioEngine */; };
+		53CD78153466CDE351D86771 /* ConsoleViewModelLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB91DD30866DEFA8DE2998A1 /* ConsoleViewModelLifecycleTests.swift */; };
 		5ACCD643C76B8FFDDD6CE8FF /* RouterRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6CF52141C9E399BB8CAADB5 /* RouterRecoveryTests.swift */; };
 		66A4F65A334F9D25F5182911 /* BamCore in Frameworks */ = {isa = PBXBuildFile; productRef = C2F69472178C3D00A024AAE5 /* BamCore */; };
 		66D1D1C058436C40FCAB7A42 /* ConsoleViewModel+MixerControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3682354B40DAFEB00830820E /* ConsoleViewModel+MixerControl.swift */; };
 		68E75D40B3995E1827DDF1A2 /* Log.swift in Sources */ = {isa = PBXBuildFile; fileRef = D775C14357F80E055B095736 /* Log.swift */; };
+		6DDD1201C3BDFE98417BDDC4 /* RouterStartupIntentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A1972EA59BDD1066151F2FB /* RouterStartupIntentTests.swift */; };
+		6FA829FF582BFF6EEAA6B893 /* BamControlKit in Frameworks */ = {isa = PBXBuildFile; productRef = 9E58070D92F985C1FCD0B5C9 /* BamControlKit */; };
 		7B61C45064A107B28B4A6CB7 /* ConsoleViewModel+Volume.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6E8A251E92BA04BC821A812 /* ConsoleViewModel+Volume.swift */; };
 		8C48A55690421E4B23FE3EC5 /* ChannelStrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56565B7281A1EBD3533F2E5B /* ChannelStrip.swift */; };
 		9EC89CCDE55A5DE2E4ECF343 /* RouterSafetyConcurrencyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25759BF0446B8721EC73F01D /* RouterSafetyConcurrencyTests.swift */; };
@@ -20,11 +26,14 @@
 		AF1ACB6FF224BC0D3F328D1E /* AudioRecoveryDisplayState.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD27CF0F8C598478D6CFFC1F /* AudioRecoveryDisplayState.swift */; };
 		B8EB51CB3A3569BD4BE2C3DD /* BamApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B310ECE845F2AF06ECF89C86 /* BamApp.swift */; };
 		BA3C53357AE7956A30B0B5B7 /* ConsoleTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A0B923B1721FFDB99A180DE /* ConsoleTheme.swift */; };
+		BDDD75BE91118B3DBC8C9CFF /* OutputProtection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A549902DE0CFF1C9E16FEF0 /* OutputProtection.swift */; };
 		BF3C9FBC60C681C22AD7DCBE /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 9DFF1D19FCE138E031679810 /* Assets.xcassets */; };
+		CF8E75A2E96EC62F76648564 /* BamCore in Frameworks */ = {isa = PBXBuildFile; productRef = C9B32F9A3C2B10B8C94E88E0 /* BamCore */; };
 		D2E1BF0775317098AB298353 /* ConsoleViewModel+Routing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A6E858B1BA9B3C6D08EF60E /* ConsoleViewModel+Routing.swift */; };
-		DA9561039E53227968D57B12 /* MeterBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29090E0D63EACFDF77E1A7CD /* MeterBar.swift */; };
+		DEA1460E2219F276AFF3131D /* LiveExitPathTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4E22AE825568C0A54104344 /* LiveExitPathTests.swift */; };
 		E76E0E6166086845C988A34D /* ConsoleViewModelUseCaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10AB49B15328BE7A0FDFF21 /* ConsoleViewModelUseCaseTests.swift */; };
 		E8F967216E27372A8CEF9FD7 /* BamControlKit in Frameworks */ = {isa = PBXBuildFile; productRef = D2F0313AF12090041C480E53 /* BamControlKit */; };
+		F017138E415371FC5733427B /* PeakHold.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01A7698D14234DCD0FA72CBA /* PeakHold.swift */; };
 		FAD8F0918279CFCAC4A53A0B /* bam.yaml in Resources */ = {isa = PBXBuildFile; fileRef = 0425A295A3528927CF29587D /* bam.yaml */; };
 		FBA2134C96A2E13DA9155BED /* AudioEngine in Frameworks */ = {isa = PBXBuildFile; productRef = 93500ACEF0F9DE2FB41A931E /* AudioEngine */; };
 /* End PBXBuildFile section */
@@ -40,15 +49,19 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		01A7698D14234DCD0FA72CBA /* PeakHold.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeakHold.swift; sourceTree = "<group>"; };
 		0425A295A3528927CF29587D /* bam.yaml */ = {isa = PBXFileReference; lastKnownFileType = text.yaml; path = bam.yaml; sourceTree = "<group>"; };
 		19EAE6316D97A824FA6AB00C /* bamTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = bamTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		25759BF0446B8721EC73F01D /* RouterSafetyConcurrencyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouterSafetyConcurrencyTests.swift; sourceTree = "<group>"; };
-		29090E0D63EACFDF77E1A7CD /* MeterBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeterBar.swift; sourceTree = "<group>"; };
+		2A1972EA59BDD1066151F2FB /* RouterStartupIntentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouterStartupIntentTests.swift; sourceTree = "<group>"; };
 		3682354B40DAFEB00830820E /* ConsoleViewModel+MixerControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ConsoleViewModel+MixerControl.swift"; sourceTree = "<group>"; };
+		385C8A345BD5D8824F5156BC /* ConsoleSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConsoleSnapshotTests.swift; sourceTree = "<group>"; };
 		4DD2D055563B514321429B1D /* ConsoleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConsoleView.swift; sourceTree = "<group>"; };
 		56565B7281A1EBD3533F2E5B /* ChannelStrip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChannelStrip.swift; sourceTree = "<group>"; };
+		6C9AE8C107194442B4273A6B /* PeakHoldTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeakHoldTests.swift; sourceTree = "<group>"; };
 		767CA954922083AFCB350404 /* ConsoleViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConsoleViewModel.swift; sourceTree = "<group>"; };
 		8A0B923B1721FFDB99A180DE /* ConsoleTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConsoleTheme.swift; sourceTree = "<group>"; };
+		8A549902DE0CFF1C9E16FEF0 /* OutputProtection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutputProtection.swift; sourceTree = "<group>"; };
 		8A6E858B1BA9B3C6D08EF60E /* ConsoleViewModel+Routing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ConsoleViewModel+Routing.swift"; sourceTree = "<group>"; };
 		9DFF1D19FCE138E031679810 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B310ECE845F2AF06ECF89C86 /* BamApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BamApp.swift; sourceTree = "<group>"; };
@@ -59,7 +72,9 @@
 		D5A314269AC5DE15BD2F6F77 /* bam.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = bam.entitlements; sourceTree = "<group>"; };
 		D775C14357F80E055B095736 /* Log.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Log.swift; sourceTree = "<group>"; };
 		DD27CF0F8C598478D6CFFC1F /* AudioRecoveryDisplayState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioRecoveryDisplayState.swift; sourceTree = "<group>"; };
+		E4E22AE825568C0A54104344 /* LiveExitPathTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveExitPathTests.swift; sourceTree = "<group>"; };
 		E9AD661A8BD0635A24BC6074 /* ConsoleDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConsoleDiagnostics.swift; sourceTree = "<group>"; };
+		EB91DD30866DEFA8DE2998A1 /* ConsoleViewModelLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConsoleViewModelLifecycleTests.swift; sourceTree = "<group>"; };
 		F10AB49B15328BE7A0FDFF21 /* ConsoleViewModelUseCaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConsoleViewModelUseCaseTests.swift; sourceTree = "<group>"; };
 		F6CF52141C9E399BB8CAADB5 /* RouterRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouterRecoveryTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -72,6 +87,16 @@
 				66A4F65A334F9D25F5182911 /* BamCore in Frameworks */,
 				FBA2134C96A2E13DA9155BED /* AudioEngine in Frameworks */,
 				E8F967216E27372A8CEF9FD7 /* BamControlKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		F380839B1EE7B7CCEA5E0471 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CF8E75A2E96EC62F76648564 /* BamCore in Frameworks */,
+				3FA31007D9AF5EA42B1FC40F /* AudioEngine in Frameworks */,
+				6FA829FF582BFF6EEAA6B893 /* BamControlKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -90,9 +115,14 @@
 		6579DEFAAF53FEA93222351F /* AppTests */ = {
 			isa = PBXGroup;
 			children = (
+				385C8A345BD5D8824F5156BC /* ConsoleSnapshotTests.swift */,
+				EB91DD30866DEFA8DE2998A1 /* ConsoleViewModelLifecycleTests.swift */,
 				F10AB49B15328BE7A0FDFF21 /* ConsoleViewModelUseCaseTests.swift */,
+				E4E22AE825568C0A54104344 /* LiveExitPathTests.swift */,
+				6C9AE8C107194442B4273A6B /* PeakHoldTests.swift */,
 				F6CF52141C9E399BB8CAADB5 /* RouterRecoveryTests.swift */,
 				25759BF0446B8721EC73F01D /* RouterSafetyConcurrencyTests.swift */,
+				2A1972EA59BDD1066151F2FB /* RouterStartupIntentTests.swift */,
 			);
 			path = AppTests;
 			sourceTree = "<group>";
@@ -114,7 +144,8 @@
 				B6E8A251E92BA04BC821A812 /* ConsoleViewModel+Volume.swift */,
 				C45ED77F92E7C31505AAAB9A /* Info.plist */,
 				D775C14357F80E055B095736 /* Log.swift */,
-				29090E0D63EACFDF77E1A7CD /* MeterBar.swift */,
+				8A549902DE0CFF1C9E16FEF0 /* OutputProtection.swift */,
+				01A7698D14234DCD0FA72CBA /* PeakHold.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -168,6 +199,7 @@
 			buildConfigurationList = AFC62FE933F1FD039038CB72 /* Build configuration list for PBXNativeTarget "bamTests" */;
 			buildPhases = (
 				E26FC57C1B3720842367A1E5 /* Sources */,
+				F380839B1EE7B7CCEA5E0471 /* Frameworks */,
 			);
 			buildRules = (
 			);
@@ -176,6 +208,9 @@
 			);
 			name = bamTests;
 			packageProductDependencies = (
+				C9B32F9A3C2B10B8C94E88E0 /* BamCore */,
+				C5F64AA36C7A253DD0EB7D7E /* AudioEngine */,
+				9E58070D92F985C1FCD0B5C9 /* BamControlKit */,
 			);
 			productName = bamTests;
 			productReference = 19EAE6316D97A824FA6AB00C /* bamTests.xctest */;
@@ -246,7 +281,8 @@
 				7B61C45064A107B28B4A6CB7 /* ConsoleViewModel+Volume.swift in Sources */,
 				22854C12B20885A8D5631E36 /* ConsoleViewModel.swift in Sources */,
 				68E75D40B3995E1827DDF1A2 /* Log.swift in Sources */,
-				DA9561039E53227968D57B12 /* MeterBar.swift in Sources */,
+				BDDD75BE91118B3DBC8C9CFF /* OutputProtection.swift in Sources */,
+				F017138E415371FC5733427B /* PeakHold.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -254,9 +290,14 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3BF17072ED7611E33DF19E0C /* ConsoleSnapshotTests.swift in Sources */,
+				53CD78153466CDE351D86771 /* ConsoleViewModelLifecycleTests.swift in Sources */,
 				E76E0E6166086845C988A34D /* ConsoleViewModelUseCaseTests.swift in Sources */,
+				DEA1460E2219F276AFF3131D /* LiveExitPathTests.swift in Sources */,
+				1032121E6FF82B2280749426 /* PeakHoldTests.swift in Sources */,
 				5ACCD643C76B8FFDDD6CE8FF /* RouterRecoveryTests.swift in Sources */,
 				9EC89CCDE55A5DE2E4ECF343 /* RouterSafetyConcurrencyTests.swift in Sources */,
+				6DDD1201C3BDFE98417BDDC4 /* RouterStartupIntentTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -274,33 +315,19 @@
 		523277C6BD13F7728D9B41FD /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				BUNDLE_LOADER = "";
+				BUNDLE_LOADER = "$(TEST_HOST)";
 				COMBINE_HIDPI_IMAGES = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = (
-					"$(inherited)",
-					"\"$(PROJECT_TEMP_DIR)/../../../SourcePackages/checkouts/Yams/Sources/CYaml/include\"",
-					"\"$(PROJECT_TEMP_DIR)/../../../SourcePackages/checkouts/swift-atomics/Sources/_AtomicsShims/include\"",
-				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
-					"\"$(BUILT_PRODUCTS_DIR)/bam dev.app/Contents/MacOS\"",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.4;
-				OTHER_LDFLAGS = (
-					"\"$(BUILT_PRODUCTS_DIR)/bam dev.app/Contents/MacOS/bam dev.debug.dylib\"",
-				);
-				OTHER_SWIFT_FLAGS = (
-					"$(inherited)",
-					"-Xcc",
-					"\"-fmodule-map-file=$(PROJECT_TEMP_DIR)/../../../SourcePackages/checkouts/Yams/Sources/CYaml/include/module.modulemap\"",
-					"-Xcc",
-					"\"-fmodule-map-file=$(PROJECT_TEMP_DIR)/../../../SourcePackages/checkouts/swift-atomics/Sources/_AtomicsShims/include/module.modulemap\"",
-				);
 				PRODUCT_BUNDLE_IDENTIFIER = me.harke.bamTests;
 				SDKROOT = macosx;
 				SWIFT_VERSION = 6.0;
-				TEST_HOST = "";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/bam dev.app/Contents/MacOS/bam dev";
 			};
 			name = Debug;
 		};
@@ -331,33 +358,19 @@
 		8A75E7D219A7B409A970AF43 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				BUNDLE_LOADER = "";
+				BUNDLE_LOADER = "$(TEST_HOST)";
 				COMBINE_HIDPI_IMAGES = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = (
-					"$(inherited)",
-					"\"$(PROJECT_TEMP_DIR)/../../../SourcePackages/checkouts/Yams/Sources/CYaml/include\"",
-					"\"$(PROJECT_TEMP_DIR)/../../../SourcePackages/checkouts/swift-atomics/Sources/_AtomicsShims/include\"",
-				);
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
-					"\"$(BUILT_PRODUCTS_DIR)/bam dev.app/Contents/MacOS\"",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.4;
-				OTHER_LDFLAGS = (
-					"\"$(BUILT_PRODUCTS_DIR)/bam dev.app/Contents/MacOS/bam dev.debug.dylib\"",
-				);
-				OTHER_SWIFT_FLAGS = (
-					"$(inherited)",
-					"-Xcc",
-					"\"-fmodule-map-file=$(PROJECT_TEMP_DIR)/../../../SourcePackages/checkouts/Yams/Sources/CYaml/include/module.modulemap\"",
-					"-Xcc",
-					"\"-fmodule-map-file=$(PROJECT_TEMP_DIR)/../../../SourcePackages/checkouts/swift-atomics/Sources/_AtomicsShims/include/module.modulemap\"",
-				);
 				PRODUCT_BUNDLE_IDENTIFIER = me.harke.bamTests;
 				SDKROOT = macosx;
 				SWIFT_VERSION = 6.0;
-				TEST_HOST = "";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/bam.app/Contents/MacOS/bam";
 			};
 			name = Release;
 		};
@@ -547,7 +560,19 @@
 			isa = XCSwiftPackageProductDependency;
 			productName = AudioEngine;
 		};
+		9E58070D92F985C1FCD0B5C9 /* BamControlKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = BamControlKit;
+		};
 		C2F69472178C3D00A024AAE5 /* BamCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = BamCore;
+		};
+		C5F64AA36C7A253DD0EB7D7E /* AudioEngine */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = AudioEngine;
+		};
+		C9B32F9A3C2B10B8C94E88E0 /* BamCore */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = BamCore;
 		};

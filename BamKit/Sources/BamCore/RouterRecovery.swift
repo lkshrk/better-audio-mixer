@@ -28,9 +28,13 @@ public struct RouterRecoveryPolicy: Sendable, Equatable {
     }
 
     public mutating func recordAttempt(reason: RecoveryReason, now: Date = Date()) -> RouterRecoveryEvent {
-        if let until = paused[reason], now < until {
-            return .paused(reason: reason.rawValue, attempts: attempts[reason]?.count ?? 0,
-                           window: window, cooldown: cooldown)
+        if let until = paused[reason] {
+            if now < until {
+                return .paused(reason: reason.rawValue, attempts: attempts[reason]?.count ?? 0,
+                               window: window, cooldown: cooldown)
+            }
+            attempts[reason] = nil
+            paused[reason] = nil
         }
         var recent = (attempts[reason] ?? []).filter { now.timeIntervalSince($0) <= window }
         guard recent.count < maxAttempts else {

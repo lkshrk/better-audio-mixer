@@ -1,6 +1,6 @@
 import Foundation
 
-/// One source routed into one mix, with inline level + mute (Q12). Absence of a
+/// One source routed into one mix, with inline level + mute. Absence of a
 /// `Send` for a source = mix-minus (that source is not in this mix).
 public struct Send: Sendable, Equatable, Codable {
     public var source: String       // Source.id
@@ -61,7 +61,7 @@ public enum MixDestination: Sendable, Equatable, Codable {
     }
 }
 
-/// A destination mix: its sends (routing), per-mix master fader (Q20), and
+/// A destination mix: its sends (routing), per-mix master fader, and
 /// destination device.
 public struct Mix: Sendable, Equatable, Codable, Identifiable {
     public var id: String

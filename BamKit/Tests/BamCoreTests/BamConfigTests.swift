@@ -49,4 +49,68 @@ import Testing
         let decoded = try BamConfig.load(yaml: yaml)
         #expect(decoded == config)
     }
+
+    @Test func rejectsMasterOutsideUnitRange() {
+        #expect(throws: BamConfigError.masterOutOfRange(1.5)) { try BamConfig(master: 1.5).validate() }
+        #expect(throws: BamConfigError.masterOutOfRange(-0.1)) { try BamConfig(master: -0.1).validate() }
+        #expect(throws: BamConfigError.self) { try BamConfig(master: .nan).validate() }
+        #expect(throws: BamConfigError.self) { try BamConfig(master: .infinity).validate() }
+    }
+
+    @Test func rejectsMixAndSendLevelsOutsideUnitRange() {
+        let sources = [Source(id: "music", name: "Music", bundleIDs: ["com.apple.Music"])]
+        let hotMix = BamConfig(sources: sources, mixes: [
+            Mix(id: "m", name: "M", dest: .virtualSlot(0), level: 5, sends: [Send(source: "music")]),
+        ])
+        #expect(throws: BamConfigError.mixLevelOutOfRange(mix: "m", level: 5)) { try hotMix.validate() }
+
+        let hotSend = BamConfig(sources: sources, mixes: [
+            Mix(id: "m", name: "M", dest: .virtualSlot(0), sends: [Send(source: "music", level: -0.5)]),
+        ])
+        #expect(throws: BamConfigError.sendLevelOutOfRange(mix: "m", source: "music", level: -0.5)) {
+            try hotSend.validate()
+        }
+
+        let nanSend = BamConfig(sources: sources, mixes: [
+            Mix(id: "m", name: "M", dest: .virtualSlot(0), sends: [Send(source: "music", level: .nan)]),
+        ])
+        #expect(throws: BamConfigError.self) { try nanSend.validate() }
+    }
+
+    @Test func rejectsPansOutsideUnitRangeOrForUnknownSources() {
+        let sources = [Source(id: "music", name: "Music", bundleIDs: ["com.apple.Music"])]
+        #expect(throws: BamConfigError.panOutOfRange(source: "music", pan: 2)) {
+            try BamConfig(sources: sources, pans: ["music": 2]).validate()
+        }
+        #expect(throws: BamConfigError.unknownPanSource("ghost")) {
+            try BamConfig(sources: sources, pans: ["ghost": 0.5]).validate()
+        }
+        #expect(throws: Never.self) { try BamConfig(sources: sources, pans: ["music": 0.5]).validate() }
+    }
+
+    @Test func loadPrunesPansForRemovedSources() throws {
+        let yaml = """
+        master: 1
+        sources:
+          - id: music
+            name: Music
+            bundleIDs: [com.apple.Music]
+        mixes: []
+        pans:
+          music: 0.25
+          ghost: 0.5
+        """
+        let config = try BamConfig.load(yaml: yaml)
+        #expect(config.pans == ["music": 0.25])
+    }
+
+    @Test func loadRejectsNonFiniteYAMLValues() {
+        let yaml = """
+        master: .nan
+        sources:
+          - id: music
+            name: Music
+        """
+        #expect(throws: BamConfigError.self) { try BamConfig.load(yaml: yaml) }
+    }
 }

@@ -46,4 +46,40 @@ final class ConfigStoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path),
                        "an invalid config must not leave a partial file on disk")
     }
+
+    func testSaveRejectsOutOfRangeLevelAndWritesNothing() {
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        var hot = sampleConfig()
+        hot.master = 3
+        XCTAssertThrowsError(try ConfigStore.save(hot, to: url))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    func testLoadOrSeedWritesSeedOnlyWhenMissing() throws {
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let seed = try sampleConfig().yaml()
+        let first = try ConfigStore.loadOrSeed(seed: seed, url: url)
+        XCTAssertEqual(first.url, url)
+        XCTAssertEqual(first.config, sampleConfig())
+
+        var edited = sampleConfig()
+        edited.master = 0.5
+        try ConfigStore.save(edited, to: url)
+        XCTAssertEqual(try ConfigStore.loadOrSeed(seed: seed, url: url).config, edited)
+    }
+
+    func testLoadOrSeedLeavesCorruptFileInPlaceAndThrows() throws {
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let corrupt = "master: [not yaml"
+        try corrupt.write(to: url, atomically: true, encoding: .utf8)
+        XCTAssertThrowsError(try ConfigStore.loadOrSeed(seed: try sampleConfig().yaml(), url: url))
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), corrupt,
+                       "a corrupt config must not be overwritten by the seed")
+    }
 }

@@ -58,12 +58,12 @@ final class CallbackDiagnosticsTests: XCTestCase {
         let limiter = try XCTUnwrap(NativePeakLimiter(sampleRate: 48000, maximumFrames: 128))
         var samples = [Float](repeating: 0, count: 128)
         samples[0] = .nan
-        samples.withUnsafeMutableBufferPointer { limiter.process(left: $0.baseAddress!, right: nil, stride: 1, frames: 128) }
+        samples.withUnsafeMutableBufferPointer { _ = limiter.process(left: $0.baseAddress!, right: nil, stride: 1, frames: 128) }
         XCTAssertEqual(limiter.inputOverCeilingCallbacks, 0)
         XCTAssertGreaterThan(limiter.guardedSamples, 0)
         samples = [Float](repeating: 0, count: 128)
         samples[0] = 2
-        samples.withUnsafeMutableBufferPointer { limiter.process(left: $0.baseAddress!, right: nil, stride: 1, frames: 128) }
+        samples.withUnsafeMutableBufferPointer { _ = limiter.process(left: $0.baseAddress!, right: nil, stride: 1, frames: 128) }
         XCTAssertEqual(limiter.inputOverCeilingCallbacks, 1)
         XCTAssertEqual(limiter.renderFailures, 0)
     }

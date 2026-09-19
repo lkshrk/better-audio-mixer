@@ -1,8 +1,6 @@
 import Foundation
 
-/// Bridges the Elgato WebSocket and BAM's UDS control socket. Phase 2 proves the
-/// bridge end-to-end: connect to BAM on the first `willAppear`, run the hello
-/// handshake, and log every inbound frame. No key/dial actions yet.
+/// Bridges the Elgato WebSocket and BAM's UDS control socket.
 @MainActor
 final class Plugin {
     private let elgato: ElgatoConnection
@@ -19,16 +17,28 @@ final class Plugin {
     func run() {
         router.sendToBAM = { [weak self] frame in self?.uds.send(frame) }
         uds.onFrame = { [weak self] frame in self?.router.ingestBAMFrame(frame) }
+        uds.onDisconnect = { [weak self] in self?.router.markOffline() }
         elgato.onEvent = { [weak self] event, obj in self?.handleElgatoEvent(event, obj) }
         elgato.connect()
     }
 
     private func handleElgatoEvent(_ event: String, _ obj: [String: Any]) {
         Log.info("Elgato event: \(event)")
-        // Connect eagerly the first time any action surfaces.
-        if event == "willAppear", !udsConnectStarted {
+        switch event {
+        case "willAppear":
+            if !udsConnectStarted {
+                udsConnectStarted = true
+                uds.connect()
+            }
+        case "applicationDidLaunch":
             udsConnectStarted = true
-            uds.connect()
+            uds.reconnectNow()
+        case "applicationDidTerminate":
+            router.markOffline()
+        case "keyDown", "dialDown", "touchTap":
+            uds.launchBAMIfNeeded()
+        default:
+            break
         }
         router.handleEvent(event, obj)
     }

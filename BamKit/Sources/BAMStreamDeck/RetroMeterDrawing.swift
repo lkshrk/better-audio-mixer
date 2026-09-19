@@ -2,603 +2,241 @@ import AppKit
 import CoreText
 import Foundation
 
+/// Gauge geometry shared by the retro key and dial, plus the dial LCD canvases and live layers.
+@MainActor
 enum RetroMeterDrawing {
-    private static let mutedRed = NSColor(calibratedRed: 1.0, green: 0.25, blue: 0.25, alpha: 1)
-    private static let meterGreen = NSColor(calibratedRed: 0.15, green: 0.85, blue: 0.36, alpha: 1)
-    private static let meterAmber = NSColor(calibratedRed: 1.0, green: 0.68, blue: 0.20, alpha: 1)
-    @MainActor private static var lcdLevelBarSVGCache: [String: String] = [:]
+    private static var lcdLevelBarSVGCache: [String: String] = [:]
 
-    static func drawKeyFrame(side: CGFloat, name: String, glyph: KeyImage.Glyph? = nil,
-                             monogram: String, accent: NSColor,
-                             pct: Int, level: Float, muted: Bool) {
-        drawFace(rect: NSRect(x: 6, y: 2, width: side - 12, height: 80),
-                 cornerRadius: 8, glyph: glyph, label: monogram, name: name, pct: pct,
-                 level: level, muted: muted, accent: accent, compact: true)
+    /// Circular arc from 165° (silence) to 15° (clip) in bottom-left coordinates.
+    struct Gauge {
+        var center: NSPoint
+        var radius: CGFloat
+        var needleLength: CGFloat { radius - 12 }
+        var hubRadius: CGFloat { radius * 0.075 }
+
+        func offset(dx: CGFloat, dy: CGFloat) -> Gauge {
+            Gauge(center: NSPoint(x: center.x + dx, y: center.y + dy), radius: radius)
+        }
     }
 
-    static func renderLCD(name: String, glyph: KeyImage.Glyph? = nil,
-                          monogram: String, accent: NSColor,
-                          pct: Int, level: Float, muted: Bool,
-                          style: KeyStyleImage.KeyStyle = .retro) -> String? {
-        renderLCDFrame(name: name, glyph: glyph, monogram: monogram, accent: accent,
-                       pct: pct, level: level, muted: muted, style: style,
-                       includeLiveMeters: true)
+    static let sweepStart: CGFloat = 165
+    static let sweepEnd: CGFloat = 15
+    static let tickCount = 11
+
+    static let keyGauge = Gauge(center: NSPoint(x: 72, y: 16), radius: 62)
+    static let lcdSize = NSSize(width: 200, height: 100)
+    static let lcdGauge = Gauge(center: NSPoint(x: 100, y: 2), radius: 58)
+    static let lcdNeedleLayer = NSRect(x: 0, y: 0, width: 200, height: 64)
+    static let lcdHeaderOrigin = NSPoint(x: 8, y: 66)
+    static let lcdValueRect = NSRect(x: 112, y: 66, width: 80, height: 28)
+    static let lcdChannelBar = NSRect(x: 8, y: 40, width: 184, height: 16)
+    static let lcdChannelRail = NSRect(x: 8, y: 20, width: 184, height: 8)
+    static let lcdLeftBar = NSRect(x: 26, y: 42, width: 166, height: 14)
+    static let lcdRightBar = NSRect(x: 26, y: 20, width: 166, height: 14)
+
+    static func angle(for fraction: CGFloat) -> CGFloat {
+        (sweepStart - (sweepStart - sweepEnd) * max(0, min(1, fraction))) * .pi / 180
     }
 
-    static func renderRetroLCDStatic(name: String, glyph: KeyImage.Glyph? = nil,
-                                     monogram: String, accent: NSColor,
-                                     pct: Int, muted: Bool) -> String? {
-        renderLCDFrame(name: name, glyph: glyph, monogram: monogram, accent: accent,
-                       pct: pct, level: 0, muted: muted, style: .retro,
-                       includeLiveMeters: false)
+    static func point(center: NSPoint, radius: CGFloat, angle: CGFloat) -> NSPoint {
+        NSPoint(x: center.x + cos(angle) * radius, y: center.y + sin(angle) * radius)
     }
 
-    static func renderLCDStatic(style: KeyStyleImage.KeyStyle,
-                                name: String, glyph: KeyImage.Glyph? = nil,
-                                monogram: String, accent: NSColor,
-                                pct: Int, muted: Bool) -> String? {
-        renderLCDFrame(name: name, glyph: glyph, monogram: monogram, accent: accent,
-                       pct: pct, level: 0, muted: muted, style: style,
-                       includeLiveMeters: false)
+    // MARK: - Gauge face (raster)
+
+    static func drawGauge(_ g: Gauge, volumeFraction: CGFloat?, accent: RGB, muted: Bool) {
+        let arc = NSBezierPath()
+        arc.appendArc(withCenter: g.center, radius: g.radius, startAngle: sweepStart, endAngle: sweepEnd, clockwise: true)
+        arc.lineWidth = 2
+        Palette.rail.nsColor.setStroke()
+        arc.stroke()
+
+        for i in 0..<tickCount {
+            let frac = CGFloat(i) / CGFloat(tickCount - 1)
+            let major = i % 5 == 0
+            let a = angle(for: frac)
+            let path = NSBezierPath()
+            path.move(to: point(center: g.center, radius: g.radius - 1, angle: a))
+            path.line(to: point(center: g.center, radius: g.radius - (major ? 10 : 7), angle: a))
+            path.lineWidth = major ? 2 : 1.2
+            tickColor(frac, muted: muted).setStroke()
+            path.stroke()
+        }
+
+        if let volumeFraction {
+            let a = angle(for: volumeFraction)
+            let path = NSBezierPath()
+            path.move(to: point(center: g.center, radius: g.radius - 3, angle: a))
+            path.line(to: point(center: g.center, radius: g.radius + 4, angle: a))
+            path.lineWidth = 3.5
+            path.lineCapStyle = .round
+            (muted ? Palette.mutedRed : accent).nsColor.setStroke()
+            path.stroke()
+        }
     }
 
-    static func retroLCDLevelNeedleStep(level: Float, muted: Bool) -> Int {
-        guard !muted else { return 0 }
-        let clamped = max(0, min(1, level))
-        return Int((clamped * 90).rounded())
+    private static func tickColor(_ fraction: CGFloat, muted: Bool) -> NSColor {
+        if muted { return Palette.rail.nsColor }
+        return fraction > Palette.segmentBands[1].upTo ? Palette.mutedRed.nsColor : Palette.tick.nsColor
     }
 
-    static func lcdLevelBarStep(level: Float, muted: Bool) -> Int {
-        guard !muted else { return 0 }
-        let clamped = max(0, min(1, level))
-        return Int((clamped * 100).rounded())
+    /// Needle and hub as SVG elements inside a canvas `height` tall (top-down coordinates).
+    static func needleSVG(_ g: Gauge, canvasHeight: CGFloat, fraction: CGFloat, muted: Bool) -> String {
+        let end = point(center: g.center, radius: g.needleLength, angle: angle(for: fraction))
+        let color = muted ? Palette.rail : Palette.needle
+        return String(format: """
+        <line x1="%.2f" y1="%.2f" x2="%.2f" y2="%.2f" stroke="%@" stroke-width="2.2" stroke-linecap="round"/> \
+        <circle cx="%.2f" cy="%.2f" r="%.2f" fill="%@"/>
+        """, Double(g.center.x), Double(canvasHeight - g.center.y), Double(end.x), Double(canvasHeight - end.y),
+           color.hex, Double(g.center.x), Double(canvasHeight - g.center.y), Double(g.hubRadius), color.hex)
     }
 
-    @MainActor static func renderLCDLevelBarSVG(width: Int, height: Int, step: Int,
-                                                peakStep: Int? = nil, muted: Bool) -> String {
-        let normalizedStep = max(0, min(100, step))
-        let normalizedPeak = max(0, min(100, peakStep ?? normalizedStep))
+    private static func peakTickSVG(_ g: Gauge, canvasHeight: CGFloat, fraction: CGFloat) -> String {
+        let a = angle(for: fraction)
+        let outer = point(center: g.center, radius: g.radius - 1, angle: a)
+        let inner = point(center: g.center, radius: g.radius - 9, angle: a)
+        return String(format: """
+        <line x1="%.2f" y1="%.2f" x2="%.2f" y2="%.2f" stroke="%@" stroke-opacity="0.7" stroke-width="2" stroke-linecap="round"/>
+        """, Double(outer.x), Double(canvasHeight - outer.y), Double(inner.x), Double(canvasHeight - inner.y),
+           Palette.text.hex)
+    }
+
+    static func keyNeedleSVG(step: Int, muted: Bool) -> String {
+        needleSVG(keyGauge, canvasHeight: KeyStyleImage.side,
+                  fraction: MeterScale.fraction(step: step, steps: MeterScale.keyNeedleSteps), muted: muted)
+    }
+
+    // MARK: - Dial LCD (200×100)
+
+    struct LCDInput: Hashable {
+        var style: KeyStyleImage.KeyStyle
+        var glyph: KeyImage.Glyph?
+        var monogram: String
+        var accent: RGB
+        var name: String
+        var pct: Int
+        var muted: Bool
+    }
+
+    static func renderLCDStatic(_ input: LCDInput) -> String? {
+        PNGCanvas.render(width: Int(lcdSize.width), height: Int(lcdSize.height)) {
+            Palette.lcdBackground.nsColor.setFill()
+            NSRect(origin: .zero, size: lcdSize).fill()
+            KeyHeader.draw(KeyHeader.Input(glyph: input.glyph, monogram: input.monogram, accent: input.accent,
+                                           name: input.name, spec: .dial, muted: input.muted),
+                           at: lcdHeaderOrigin)
+            drawLCDValue(pct: input.pct, muted: input.muted)
+            switch input.style {
+            case .channel:
+                drawTrack(lcdChannelBar)
+                drawVolumeRail(lcdChannelRail, pct: input.pct, muted: input.muted, accent: input.accent)
+            case .meter:
+                drawTrack(lcdLeftBar)
+                drawSideLabel("L", rect: NSRect(x: 8, y: lcdLeftBar.minY, width: 16, height: lcdLeftBar.height))
+                drawTrack(lcdRightBar)
+                drawSideLabel("R", rect: NSRect(x: 8, y: lcdRightBar.minY, width: 16, height: lcdRightBar.height))
+            case .retro:
+                drawGauge(lcdGauge, volumeFraction: CGFloat(max(0, min(100, input.pct))) / 100,
+                          accent: input.accent, muted: input.muted)
+            }
+            return true
+        }
+    }
+
+    static func renderLCDLevelBarSVG(width: Int, height: Int, step: Int, peakStep: Int? = nil, muted: Bool) -> String {
+        let normalizedStep = max(0, min(MeterScale.lcdBarSteps, step))
+        let normalizedPeak = max(0, min(MeterScale.lcdBarSteps, peakStep ?? normalizedStep))
         let cacheKey = "\(width)|\(height)|\(normalizedStep)|\(normalizedPeak)|\(muted ? 1 : 0)"
         if let cached = lcdLevelBarSVGCache[cacheKey] { return cached }
 
-        let fillWidth = Double(width) * Double(normalizedStep) / 100
-        let coverWidth = max(0, Double(width) - fillWidth)
-        let peakX = min(Double(width) - 2, max(1, Double(width) * Double(normalizedPeak) / 100))
-        let radius = min(2.0, Double(height) / 4)
-        let opacity = muted ? "0.45" : "1"
-        let peakOpacity = muted ? "0.55" : "1"
-        let svg = String(format: """
-        <svg width="%d" height="%d" viewBox="0 0 %d %d" xmlns="http://www.w3.org/2000/svg">
-          <defs>
-            <linearGradient id="meter" x1="0" y1="0" x2="%d" y2="0" gradientUnits="userSpaceOnUse">
-              <stop offset="0%%" stop-color="#26D65E"/>
-              <stop offset="30%%" stop-color="#26D65E"/>
-              <stop offset="60%%" stop-color="#FFD43B"/>
-              <stop offset="75%%" stop-color="#FF9A2E"/>
-              <stop offset="90%%" stop-color="#FF3C4E"/>
-              <stop offset="100%%" stop-color="#FF3C4E"/>
-            </linearGradient>
-          </defs>
-          <rect x="0" y="0" width="%d" height="%d" rx="%.2f" fill="url(#meter)" opacity="%@"/>
-          <rect x="%.2f" y="0" width="%.2f" height="%d" rx="%.2f" fill="#292929"/>
-          <rect x="%.2f" y="0" width="4" height="%d" rx="1" fill="#050505" opacity="%@"/>
-          <rect x="%.2f" y="0" width="2" height="%d" rx="1" fill="#FF3636" opacity="%@"/>
+        let w = Double(width), h = Double(height)
+        let fillWidth = w * Double(normalizedStep) / Double(MeterScale.lcdBarSteps)
+        let radius = min(2.0, h / 4)
+        let stops = Palette.segmentGradientStops.map {
+            "<stop offset=\"\(KeyStyleImage.f($0.offset * 100))%\" stop-color=\"\($0.color.hex)\"/>"
+        }.joined()
+        let fill = normalizedStep > 0
+            ? "<rect x=\"0\" y=\"0\" width=\"\(KeyStyleImage.f(fillWidth))\" height=\"\(height)\" rx=\"\(KeyStyleImage.f(radius))\" fill=\"url(#meter)\"/>"
+            : ""
+        var peak = ""
+        if normalizedPeak > 0 && !muted {
+            let peakX = min(w - 2, max(1, w * Double(normalizedPeak) / Double(MeterScale.lcdBarSteps)))
+            peak = "<rect x=\"\(KeyStyleImage.f(peakX - 1.5))\" y=\"0\" width=\"4\" height=\"\(height)\" fill=\"\(Palette.lcdBackground.hex)\"/>"
+                + "<rect x=\"\(KeyStyleImage.f(peakX - 0.5))\" y=\"0\" width=\"2\" height=\"\(height)\" fill=\"\(Palette.text.hex)\"/>"
+        }
+        let svg = """
+        <svg width="\(width)" height="\(height)" viewBox="0 0 \(width) \(height)" xmlns="http://www.w3.org/2000/svg">
+        <defs><linearGradient id="meter" x1="0" y1="0" x2="\(width)" y2="0" gradientUnits="userSpaceOnUse">\(stops)</linearGradient></defs>
+        <rect x="0" y="0" width="\(width)" height="\(height)" rx="\(KeyStyleImage.f(radius))" fill="\(Palette.rail.hex)"/>
+        \(fill)
+        \(peak)
         </svg>
-        """, width, height, width, height,
-           width, width, height, radius, opacity,
-           fillWidth, coverWidth, height, radius,
-           peakX - 1, height, peakOpacity,
-           peakX, height, peakOpacity)
-        let uri = "data:image/svg+xml;base64," + Data(svg.utf8).base64EncodedString()
+        """
+        let uri = PNGCanvas.svgDataURI(svg)
         if lcdLevelBarSVGCache.count > 512 { lcdLevelBarSVGCache.removeAll(keepingCapacity: true) }
         lcdLevelBarSVGCache[cacheKey] = uri
         return uri
     }
 
-    static func renderRetroLCDLevelNeedleSVG(step: Int, muted: Bool) -> String {
-        let normalizedStep = max(0, min(90, step))
-        let fraction = CGFloat(normalizedStep) / 90
-        let angle = lcdAngle(for: fraction)
-        let center = CGPoint(x: 82, y: 65)
-        let end = CGPoint(x: center.x + cos(angle) * 54,
-                          y: center.y - sin(angle) * 40)
-        let stroke = muted ? "#616161" : "#F0F0F0"
-        let svg = String(format: """
-        <svg width="164" height="56" viewBox="0 0 164 56" xmlns="http://www.w3.org/2000/svg">
-          <line x1="82" y1="65" x2="%.2f" y2="%.2f" stroke="%@" stroke-width="2.2" stroke-linecap="round"/>
+    /// Needle layer in `lcdNeedleLayer` coordinates; the peak tick is left out at step 0.
+    static func renderRetroLCDNeedleSVG(step: Int, peakStep: Int = 0, muted: Bool) -> String {
+        let layer = lcdNeedleLayer
+        let gauge = lcdGauge.offset(dx: -layer.minX, dy: -layer.minY)
+        let fraction = MeterScale.fraction(step: step, steps: MeterScale.lcdNeedleSteps)
+        var body = needleSVG(gauge, canvasHeight: layer.height, fraction: fraction, muted: muted)
+        if peakStep > 0 && !muted {
+            body = peakTickSVG(gauge, canvasHeight: layer.height,
+                               fraction: MeterScale.fraction(step: peakStep, steps: MeterScale.lcdNeedleSteps)) + body
+        }
+        let svg = """
+        <svg width="\(Int(layer.width))" height="\(Int(layer.height))" viewBox="0 0 \(Int(layer.width)) \(Int(layer.height))" xmlns="http://www.w3.org/2000/svg">
+        \(body)
         </svg>
-        """, Double(end.x), Double(end.y), stroke)
-        let encoded = Data(svg.utf8).base64EncodedString()
-        return "data:image/svg+xml;base64," + encoded
+        """
+        return PNGCanvas.svgDataURI(svg)
     }
 
-    private static func renderLCDFrame(name: String, glyph: KeyImage.Glyph? = nil,
-                                       monogram: String, accent: NSColor,
-                                       pct: Int, level: Float, muted: Bool,
-                                       style: KeyStyleImage.KeyStyle,
-                                       includeLiveMeters: Bool) -> String? {
-        let width = 200
-        let height = 100
-        guard let rep = NSBitmapImageRep(
-            bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
-            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
-            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
-              let ctx = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+    // MARK: - LCD pieces (raster, bottom-left coordinates)
 
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = ctx
-        ctx.imageInterpolation = .high
-
-        NSColor(calibratedWhite: 0.05, alpha: 1).setFill()
-        NSRect(x: 0, y: 0, width: width, height: height).fill()
-        switch style {
-        case .channel:
-            drawChannelLCD(name: name, accent: accent, pct: pct, level: level, muted: muted,
-                           includeLevelMeter: includeLiveMeters)
-        case .meter:
-            drawMeterFocusLCD(name: name, pct: pct, level: level, muted: muted,
-                              includeLevelMeter: includeLiveMeters)
-        case .retro:
-            drawLCDReferencePanel(name: name, accent: accent, pct: pct, level: level, muted: muted,
-                                  includeLevelNeedle: includeLiveMeters)
-        }
-
-        ctx.flushGraphics()
-        NSGraphicsContext.restoreGraphicsState()
-
-        guard let png = rep.representation(using: .png, properties: [:]) else { return nil }
-        return "data:image/png;base64," + png.base64EncodedString()
+    private static func drawLCDValue(pct: Int, muted: Bool) {
+        let para = NSMutableParagraphStyle()
+        para.alignment = .right
+        let text = muted ? "Muted" : "\(max(0, min(100, pct)))%"
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: muted ? 16 : 23, weight: .heavy),
+            .foregroundColor: (muted ? Palette.mutedRed : Palette.text).nsColor,
+            .paragraphStyle: para,
+        ]
+        let s = NSAttributedString(string: text, attributes: attrs)
+        let h = s.size().height
+        s.draw(in: NSRect(x: lcdValueRect.minX, y: lcdValueRect.midY - h / 2, width: lcdValueRect.width, height: h))
     }
 
-    private static func drawChannelLCD(name: String, accent: NSColor,
-                                       pct: Int, level: Float, muted: Bool,
-                                       includeLevelMeter: Bool) {
-        drawLCDHeader(name: name, pct: pct, muted: muted)
-        drawLevelBar(rect: NSRect(x: 56, y: 40, width: 128, height: 17),
-                     level: level, muted: muted, includeFill: includeLevelMeter)
-        drawVolumeRail(rect: NSRect(x: 56, y: 20, width: 128, height: 8), pct: pct, muted: muted, accent: accent)
+    private static func drawTrack(_ rect: NSRect) {
+        Palette.rail.nsColor.setFill()
+        NSBezierPath(roundedRect: rect, xRadius: 2, yRadius: 2).fill()
     }
 
-    private static func drawMeterFocusLCD(name: String, pct: Int, level: Float, muted: Bool,
-                                          includeLevelMeter: Bool) {
-        drawLCDHeader(name: name, pct: pct, muted: muted)
-        drawLevelBar(rect: NSRect(x: 71, y: 41, width: 113, height: 13),
-                     level: level, muted: muted, includeFill: includeLevelMeter)
-        drawMeterSideLabel("L", rect: NSRect(x: 54, y: 41, width: 15, height: 13))
-        drawLevelBar(rect: NSRect(x: 71, y: 21, width: 113, height: 13),
-                     level: level, muted: muted, includeFill: includeLevelMeter)
-        drawMeterSideLabel("R", rect: NSRect(x: 54, y: 21, width: 15, height: 13))
-    }
-
-    private static func drawLCDHeader(name: String, pct: Int, muted: Bool) {
-        drawLabel(shortLCDName(name), rect: NSRect(x: 16, y: 68, width: 104, height: 18),
-                  size: 13, color: .white, align: .left)
-        drawLabel(muted ? "MUTED" : "\(pct)%",
-                  rect: NSRect(x: 126, y: 62, width: 58, height: 25),
-                  size: muted ? 12 : 21, color: muted ? mutedRed : .white, align: .right)
-    }
-
-    private static func drawStereoMeters(left: NSRect, right: NSRect, level: Float, muted: Bool) {
-        drawVerticalMeter(rect: left, level: level, muted: muted)
-        drawVerticalMeter(rect: right, level: level, muted: muted)
-    }
-
-    private static func drawVerticalMeter(rect: NSRect, level: Float, muted: Bool) {
-        NSColor(calibratedWhite: 0.16, alpha: 1).setFill()
-        NSBezierPath(roundedRect: rect, xRadius: 3, yRadius: 3).fill()
-        let frac = muted ? CGFloat(0) : CGFloat(max(0, min(1, level)))
-        guard frac > 0 else { return }
-        let fillHeight = rect.height * frac
-        let fill = NSRect(x: rect.minX, y: rect.minY, width: rect.width, height: fillHeight)
-        meterGreen.setFill()
-        NSBezierPath(roundedRect: NSRect(x: fill.minX, y: fill.minY, width: fill.width, height: min(fill.height, rect.height * 0.78)),
-                     xRadius: 3, yRadius: 3).fill()
-        if frac > 0.78 {
-            meterAmber.setFill()
-            let amberY = rect.minY + rect.height * 0.78
-            let amberH = min(fill.maxY - amberY, rect.height * 0.14)
-            NSRect(x: rect.minX, y: amberY, width: rect.width, height: max(0, amberH)).fill()
-        }
-        if frac > 0.92 {
-            mutedRed.setFill()
-            let redY = rect.minY + rect.height * 0.92
-            NSRect(x: rect.minX, y: redY, width: rect.width, height: max(0, fill.maxY - redY)).fill()
-        }
-    }
-
-    private static func drawLevelBar(rect: NSRect, level: Float, muted: Bool, includeFill: Bool = true) {
-        NSColor(calibratedWhite: 0.16, alpha: 1).setFill()
-        NSBezierPath(roundedRect: rect, xRadius: 3, yRadius: 3).fill()
-        guard includeFill else { return }
-        let frac = muted ? CGFloat(0) : CGFloat(max(0, min(1, level)))
-        guard frac > 0 else { return }
-        let fill = NSRect(x: rect.minX, y: rect.minY, width: rect.width * frac, height: rect.height)
-        meterGreen.setFill()
-        NSBezierPath(roundedRect: NSRect(x: fill.minX, y: fill.minY, width: fill.width * 0.78, height: fill.height),
-                     xRadius: 3, yRadius: 3).fill()
-        if frac > 0.78 {
-            meterAmber.setFill()
-            let amberX = rect.minX + rect.width * 0.78
-            let amberW = min(fill.maxX - amberX, rect.width * 0.14)
-            NSRect(x: amberX, y: rect.minY, width: max(0, amberW), height: rect.height).fill()
-        }
-        if frac > 0.92 {
-            mutedRed.setFill()
-            let redX = rect.minX + rect.width * 0.92
-            NSRect(x: redX, y: rect.minY, width: max(0, fill.maxX - redX), height: rect.height).fill()
-        }
-    }
-
-    private static func drawVolumeRail(rect: NSRect, pct: Int, muted: Bool, accent: NSColor) {
-        NSColor(calibratedWhite: 0.22, alpha: 1).setFill()
+    private static func drawVolumeRail(_ rect: NSRect, pct: Int, muted: Bool, accent: RGB) {
+        Palette.rail.nsColor.setFill()
         NSBezierPath(roundedRect: rect, xRadius: rect.height / 2, yRadius: rect.height / 2).fill()
         let frac = CGFloat(max(0, min(100, pct))) / 100
-        (muted ? mutedRed : accent).setFill()
+        guard frac > 0 else { return }
+        (muted ? Palette.mutedRed : accent).nsColor.setFill()
         NSBezierPath(roundedRect: NSRect(x: rect.minX, y: rect.minY, width: rect.width * frac, height: rect.height),
                      xRadius: rect.height / 2, yRadius: rect.height / 2).fill()
     }
 
-    private static func drawLCDReferencePanel(name: String, accent: NSColor,
-                                              pct: Int, level: Float, muted: Bool,
-                                              includeLevelNeedle: Bool) {
-        drawLCDHeader(name: name, pct: pct, muted: muted)
-
-        let dial = NSRect(x: 18, y: 5, width: 164, height: 56)
-        let center = NSPoint(x: dial.midX, y: dial.minY - 9)
-        let radiusX: CGFloat = 80
-        let radiusY: CGFloat = 62
-        drawLCDHalfDialTexture(in: dial, center: center, radiusX: radiusX, radiusY: radiusY,
-                               accent: muted ? mutedRed : accent)
-
-        NSGraphicsContext.saveGraphicsState()
-        NSBezierPath(rect: dial).addClip()
-        let volFraction = min(0.90, max(0.10, CGFloat(max(0, min(100, pct))) / 100))
-        drawLCDArc(center: center, radiusX: radiusX, radiusY: radiusY,
-                   volumeFraction: volFraction, muted: muted)
-
-        if includeLevelNeedle {
-            let levelAngle = lcdAngle(for: muted ? 0 : CGFloat(max(0, min(1, level))))
-            drawNeedle(center: center, radiusX: radiusX - 26, radiusY: radiusY - 22, angle: levelAngle,
-                       color: NSColor(calibratedWhite: muted ? 0.38 : 0.94, alpha: 1),
-                       width: 2.2)
-        }
-        let volAngle = lcdAngle(for: volFraction)
-        drawNeedle(center: center, radiusX: radiusX - 15, radiusY: radiusY - 14, angle: volAngle,
-                   color: muted ? mutedRed : NSColor(calibratedRed: 1, green: 0.12, blue: 0.08, alpha: 1),
-                   width: 2.8)
-
-        NSColor(calibratedWhite: 0.02, alpha: 1).setFill()
-        NSBezierPath(ovalIn: NSRect(x: center.x - 4, y: center.y - 4, width: 8, height: 8)).fill()
-        (muted ? mutedRed : accent).setFill()
-        NSBezierPath(ovalIn: NSRect(x: center.x - 2, y: center.y - 2, width: 4, height: 4)).fill()
-        NSGraphicsContext.restoreGraphicsState()
-    }
-
-    private static func drawLCDHalfDialTexture(in rect: NSRect, center: NSPoint,
-                                               radiusX: CGFloat, radiusY: CGFloat,
-                                               accent: NSColor) {
-        let circleRect = NSRect(x: center.x - radiusX, y: center.y - radiusY,
-                                width: radiusX * 2, height: radiusY * 2)
-        let circle = NSBezierPath(ovalIn: circleRect)
-        let clip = NSBezierPath(rect: rect)
-        NSColor(calibratedWhite: 0.115, alpha: 1).setFill()
-        NSGraphicsContext.saveGraphicsState()
-        clip.addClip()
-        circle.fill()
-
-        for i in 0..<13 {
-            let inset = CGFloat(i) * 5.4
-            let alpha = i % 2 == 0 ? 0.09 : 0.045
-            NSColor(calibratedWhite: 0.22, alpha: alpha).setStroke()
-            let ring = NSBezierPath(ovalIn: circleRect.insetBy(dx: inset, dy: inset))
-            ring.lineWidth = 0.7
-            ring.stroke()
-        }
-        for i in 0..<28 {
-            let x = rect.minX + CGFloat((i * 37) % Int(rect.width))
-            let y = rect.minY + CGFloat((i * 19) % Int(rect.height))
-            NSColor(calibratedWhite: i % 3 == 0 ? 0.23 : 0.17, alpha: 0.22).setFill()
-            NSRect(x: x, y: y, width: 1, height: 1).fill()
-        }
-
-        NSColor(calibratedWhite: 0.38, alpha: 1).setStroke()
-        circle.lineWidth = 1.8
-        circle.stroke()
-        accent.withAlphaComponent(0.45).setStroke()
-        let inner = NSBezierPath(ovalIn: circleRect.insetBy(dx: 7, dy: 7))
-        inner.lineWidth = 1.0
-        inner.stroke()
-        NSGraphicsContext.restoreGraphicsState()
-    }
-
-    private static func drawLCDArc(center: NSPoint, radiusX: CGFloat, radiusY: CGFloat,
-                                   volumeFraction: CGFloat, muted: Bool) {
-        for i in 0...24 {
-            let frac = CGFloat(i) / 24
-            let angle = lcdAngle(for: frac)
-            let major = i % 12 == 0
-            let mid = i % 4 == 0
-            let innerX = radiusX - (major ? 14 : mid ? 10 : 6)
-            let innerY = radiusY - (major ? 11 : mid ? 8 : 5)
-            let outer = point(center: center, radiusX: radiusX, radiusY: radiusY, angle: angle)
-            let inner = point(center: center, radiusX: innerX, radiusY: innerY, angle: angle)
-            let path = NSBezierPath()
-            path.move(to: inner)
-            path.line(to: outer)
-            path.lineWidth = major ? 2.6 : mid ? 2.0 : 1.5
-            let isVolumeTick = abs(frac - volumeFraction) <= 0.5 / 24
-            (muted
-                ? NSColor(calibratedWhite: 0.28, alpha: 1)
-                : isVolumeTick
-                    ? NSColor(calibratedRed: 1, green: 0.12, blue: 0.08, alpha: 1)
-                    : NSColor(calibratedWhite: 0.48, alpha: 1)
-            ).setStroke()
-            path.stroke()
-        }
-
-        let arc = NSBezierPath()
-        for i in 0...64 {
-            let frac = CGFloat(i) / 64
-            let p = point(center: center, radiusX: radiusX - 18, radiusY: radiusY - 14,
-                          angle: lcdAngle(for: frac))
-            if i == 0 { arc.move(to: p) } else { arc.line(to: p) }
-        }
-        arc.lineWidth = 1.8
-        NSColor(calibratedWhite: 0.30, alpha: 1).setStroke()
-        arc.stroke()
-    }
-
-    private static func drawRetroReadout(pct: Int, muted: Bool) {
-        if muted {
-            drawLabel("MUTED", rect: NSRect(x: 154, y: 52, width: 38, height: 18),
-                      size: 10, color: mutedRed, align: .right)
-            return
-        }
-        drawLabel("\(max(0, min(100, pct)))", rect: NSRect(x: 158, y: 48, width: 32, height: 25),
-                  size: 19, color: .white, align: .right)
-        drawLabel("%", rect: NSRect(x: 179, y: 36, width: 11, height: 10),
-                  size: 7, color: NSColor(calibratedWhite: 0.78, alpha: 1), align: .right)
-    }
-
-    private static func drawFace(rect: NSRect, cornerRadius: CGFloat, glyph: KeyImage.Glyph?,
-                                 label: String, name: String,
-                                 pct: Int, level: Float, muted: Bool, accent: NSColor,
-                                 compact: Bool) {
-        if !compact {
-            NSColor(calibratedWhite: 0.12, alpha: 1).setFill()
-            NSBezierPath(roundedRect: rect, xRadius: cornerRadius, yRadius: cornerRadius).fill()
-            NSColor(calibratedWhite: 0.26, alpha: 1).setStroke()
-            let border = NSBezierPath(roundedRect: rect.insetBy(dx: 1, dy: 1),
-                                      xRadius: cornerRadius, yRadius: cornerRadius)
-            border.lineWidth = 1
-            border.stroke()
-        }
-
-        let center = NSPoint(x: rect.midX,
-                             y: compact ? rect.minY + 3 : rect.minY + rect.height * 0.20)
-        let radius = rect.width * 0.38
-        if compact {
-            let radiusX = rect.width * 0.54
-            let radiusY = rect.height * 0.48
-            drawCompactArc(center: center, radiusX: radiusX, radiusY: radiusY, muted: muted)
-            drawCompactTicks(center: center, radiusX: radiusX, radiusY: radiusY, muted: muted)
-        } else {
-            drawTicks(center: center, radius: radius, muted: muted)
-        }
-
-        let levelFraction = muted ? 0 : CGFloat(max(0, min(1, level)))
-        let levelAngle = compact ? compactAngle(for: levelFraction) : angle(for: levelFraction)
-        if compact {
-            drawNeedle(center: center, radiusX: rect.width * 0.50, radiusY: rect.height * 0.44,
-                       angle: levelAngle, color: NSColor(calibratedWhite: 0.86, alpha: 1),
-                       width: 2.2)
-        } else {
-            drawNeedle(center: center, radius: radius * 0.92, angle: levelAngle,
-                       color: NSColor(calibratedWhite: 0.86, alpha: 1), width: 2)
-        }
-
-        if !compact {
-            let volumeAngle = angle(for: CGFloat(max(0, min(100, pct))) / 100)
-            drawNeedle(center: center, radius: radius * 0.72, angle: volumeAngle,
-                       color: muted ? mutedRed : NSColor(calibratedRed: 1, green: 0.18, blue: 0.14, alpha: 1),
-                       width: 2.4)
-        }
-
-        NSColor(calibratedWhite: 0.04, alpha: 1).setFill()
-        NSBezierPath(ovalIn: NSRect(x: center.x - 5, y: center.y - 5, width: 10, height: 10)).fill()
-
-        if !compact {
-            let iconRect = NSRect(x: rect.minX + 12, y: rect.maxY - 31, width: 22, height: 22)
-            if glyph == nil || !drawGlyph(glyph!, in: iconRect, tintSymbols: true) {
-                drawLabel(label, rect: NSRect(x: rect.minX + 12, y: rect.maxY - 27, width: 34, height: 15),
-                          size: 8, color: muted ? mutedRed : accent, align: .left)
-            }
-            drawLabel(shortName(name), rect: NSRect(x: rect.minX + 42, y: rect.maxY - 26,
-                                                    width: rect.width - 82, height: 15),
-                      size: 9, color: .white, align: .left)
-        }
-    }
-
-    private static func drawCompactArc(center: NSPoint, radiusX: CGFloat, radiusY: CGFloat, muted: Bool) {
-        let arc = NSBezierPath()
-        for i in 0...48 {
-            let frac = CGFloat(i) / 48
-            let p = point(center: center, radiusX: radiusX - 16, radiusY: radiusY - 10,
-                          angle: compactAngle(for: frac))
-            if i == 0 { arc.move(to: p) } else { arc.line(to: p) }
-        }
-        arc.lineWidth = 2.0
-        NSColor(calibratedWhite: muted ? 0.24 : 0.34, alpha: 1).setStroke()
-        arc.stroke()
-    }
-
-    private static func drawCompactTicks(center: NSPoint, radiusX: CGFloat, radiusY: CGFloat, muted: Bool) {
-        for i in 0...10 {
-            let frac = CGFloat(i) / 10
-            let angle = compactAngle(for: frac)
-            let tick = i % 5 == 0 ? 9.0 : 6.0
-            let outer = point(center: center, radiusX: radiusX, radiusY: radiusY, angle: angle)
-            let inner = point(center: center, radiusX: radiusX - tick, radiusY: radiusY - tick, angle: angle)
-            let path = NSBezierPath()
-            path.move(to: inner)
-            path.line(to: outer)
-            path.lineWidth = i % 5 == 0 ? 1.4 : 1
-            tickColor(frac, muted: muted).setStroke()
-            path.stroke()
-        }
-    }
-
-    private static func drawTicks(center: NSPoint, radius: CGFloat, muted: Bool) {
-        for i in 0...10 {
-            let frac = CGFloat(i) / 10
-            let angle = angle(for: frac)
-            let outer = point(center: center, radius: radius, angle: angle)
-            let inner = point(center: center, radius: radius - (i % 5 == 0 ? 8 : 5), angle: angle)
-            let path = NSBezierPath()
-            path.move(to: inner)
-            path.line(to: outer)
-            path.lineWidth = i % 5 == 0 ? 1.4 : 1
-            tickColor(frac, muted: muted).setStroke()
-            path.stroke()
-        }
-    }
-
-    private static func drawNeedle(center: NSPoint, radius: CGFloat, angle: CGFloat,
-                                   color: NSColor, width: CGFloat) {
-        let end = point(center: center, radius: radius, angle: angle)
-        let path = NSBezierPath()
-        path.move(to: center)
-        path.line(to: end)
-        path.lineWidth = width
-        path.lineCapStyle = .round
-        color.setStroke()
-        path.stroke()
-    }
-
-    private static func drawNeedle(center: NSPoint, radiusX: CGFloat, radiusY: CGFloat, angle: CGFloat,
-                                   color: NSColor, width: CGFloat) {
-        let end = point(center: center, radiusX: radiusX, radiusY: radiusY, angle: angle)
-        let path = NSBezierPath()
-        path.move(to: center)
-        path.line(to: end)
-        path.lineWidth = width
-        path.lineCapStyle = .round
-        color.setStroke()
-        path.stroke()
-    }
-
-    @discardableResult
-    private static func drawGlyph(_ glyph: KeyImage.Glyph, in rect: NSRect, tintSymbols: Bool) -> Bool {
-        switch glyph {
-        case .emoji(let value):
-            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return false }
-            let font = NSFont.systemFont(ofSize: rect.height * 0.92)
-            let str = NSAttributedString(string: trimmed, attributes: [.font: font])
-            let size = str.size()
-            str.draw(at: NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2))
-            if tintSymbols {
-                NSColor.white.set()
-                rect.fill(using: .sourceAtop)
-            }
-            return true
-        case .symbol(let name):
-            guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: nil) else {
-                return false
-            }
-            let config = NSImage.SymbolConfiguration(pointSize: rect.height * 0.9, weight: .regular)
-            let image = symbol.withSymbolConfiguration(config) ?? symbol
-            let size = image.size
-            let scale = min(rect.width / max(size.width, 1), rect.height / max(size.height, 1))
-            let dest = NSRect(x: rect.midX - size.width * scale / 2,
-                              y: rect.midY - size.height * scale / 2,
-                              width: size.width * scale, height: size.height * scale)
-            image.draw(in: dest, from: .zero, operation: .sourceOver, fraction: 1)
-            if tintSymbols {
-                NSColor.white.set()
-                dest.fill(using: .sourceAtop)
-            }
-            return true
-        }
-    }
-
-    private static func drawReadout(x: CGFloat, y: CGFloat, pct: Int, muted: Bool, showPercent: Bool = false) {
-        let value = muted ? "MUTED" : showPercent ? "\(pct)%" : "\(pct)"
-        let unit = muted ? "" : showPercent ? "%" : "dB"
-        drawLabel(value, rect: NSRect(x: x, y: y, width: showPercent ? 44 : 34, height: 22),
-                  size: muted ? 9 : showPercent ? 18 : 20, color: muted ? mutedRed : .white, align: .right)
-        if !unit.isEmpty && !showPercent {
-            drawLabel(unit, rect: NSRect(x: x, y: y - 14, width: 34, height: 12),
-                      size: 8, color: NSColor(calibratedWhite: 0.78, alpha: 1), align: .right)
-        }
-    }
-
-    private static func drawLabel(_ text: String, rect: NSRect, size: CGFloat,
-                                  color: NSColor, align: NSTextAlignment) {
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = align
-        paragraph.lineBreakMode = .byTruncatingTail
-        let font = NSFont.systemFont(ofSize: size, weight: .bold)
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: color,
-            .paragraphStyle: paragraph
-        ]
-        NSAttributedString(string: text, attributes: attrs).draw(in: rect)
-    }
-
-    private static func drawMeterSideLabel(_ text: String, rect: NSRect) {
-        let font = NSFont.systemFont(ofSize: 10, weight: .bold)
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: NSColor(calibratedWhite: 0.70, alpha: 1)
-        ]
-        let label = NSAttributedString(string: text, attributes: attrs)
-        let line = CTLineCreateWithAttributedString(label)
+    private static func drawSideLabel(_ text: String, rect: NSRect) {
+        let font = NSFont.systemFont(ofSize: 11, weight: .heavy)
+        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: Palette.tick.nsColor]
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attrs))
         let width = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
-        let x = rect.midX - width / 2
-        let baseline = rect.midY - (font.ascender + font.descender) / 2
-
         guard let cg = NSGraphicsContext.current?.cgContext else { return }
         cg.saveGState()
         cg.textMatrix = .identity
-        cg.textPosition = CGPoint(x: x, y: baseline)
+        cg.textPosition = CGPoint(x: rect.midX - width / 2, y: rect.midY - (font.ascender + font.descender) / 2)
         CTLineDraw(line, cg)
         cg.restoreGState()
-    }
-
-    private static func angle(for fraction: CGFloat) -> CGFloat {
-        (-145 + 110 * max(0, min(1, fraction))) * .pi / 180
-    }
-
-    private static func compactAngle(for fraction: CGFloat) -> CGFloat {
-        (145 - 110 * max(0, min(1, fraction))) * .pi / 180
-    }
-
-    private static func lcdAngle(for fraction: CGFloat) -> CGFloat {
-        (180 - 180 * max(0, min(1, fraction))) * .pi / 180
-    }
-
-    private static func point(center: NSPoint, radius: CGFloat, angle: CGFloat) -> NSPoint {
-        NSPoint(x: center.x + cos(angle) * radius, y: center.y + sin(angle) * radius)
-    }
-
-    private static func point(center: NSPoint, radiusX: CGFloat, radiusY: CGFloat, angle: CGFloat) -> NSPoint {
-        NSPoint(x: center.x + cos(angle) * radiusX, y: center.y + sin(angle) * radiusY)
-    }
-
-    private static func tickColor(_ fraction: CGFloat, muted: Bool) -> NSColor {
-        if muted { return NSColor(calibratedWhite: 0.28, alpha: 1) }
-        if fraction > 0.82 { return mutedRed }
-        return NSColor(calibratedWhite: 0.48, alpha: 1)
-    }
-
-    private static func shortName(_ name: String) -> String {
-        name.isEmpty ? "GROUP" : name.uppercased()
-    }
-
-    private static func shortLCDName(_ name: String) -> String {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? "--" : trimmed.uppercased()
     }
 }

@@ -3,6 +3,11 @@ import XCTest
 @testable import AudioEngine
 
 final class RouterCaptureReadinessTests: XCTestCase {
+    private func assertWait(_ readiness: RouterAggregate.CaptureReadiness, after token: UInt64, timeout: TimeInterval,
+                            _ expected: Bool, _ message: String = "", file: StaticString = #filePath, line: UInt = #line) async {
+        let result = await readiness.wait(after: token, timeout: timeout)
+        XCTAssertEqual(result, expected, message, file: file, line: line)
+    }
     func testTwoMonoStreamsAreStereoDespiteMonoFirstStreamFormat() throws {
         let buffers = AudioBufferList.allocate(maximumBuffers: 2)
         defer { buffers.unsafeMutablePointer.deallocate() }
@@ -19,22 +24,22 @@ final class RouterCaptureReadinessTests: XCTestCase {
         }
     }
 
-    func testOnlyCompletedValidCallbackAfterTokenConfirmsReadiness() {
+    func testOnlyCompletedValidCallbackAfterTokenConfirmsReadiness() async {
         let readiness = RouterAggregate.CaptureReadiness()
-        XCTAssertFalse(readiness.wait(after: 0, timeout: 0))
+        await assertWait(readiness, after: 0, timeout: 0, false)
         let old = readiness.beginCallback()
         let token = readiness.token
         readiness.completeCallback(old, valid: true)
-        XCTAssertFalse(readiness.wait(after: token, timeout: 0), "In-flight callback predates the edit")
+        await assertWait(readiness, after: token, timeout: 0, false, "In-flight callback predates the edit")
         let failed = readiness.beginCallback()
         readiness.completeCallback(failed, valid: false)
-        XCTAssertFalse(readiness.wait(after: token, timeout: 0), "Invalid layout or limiter failure is not readiness")
+        await assertWait(readiness, after: token, timeout: 0, false, "Invalid layout or limiter failure is not readiness")
         let valid = readiness.beginCallback()
-        XCTAssertFalse(readiness.wait(after: token, timeout: 0), "Starting a callback is insufficient")
+        await assertWait(readiness, after: token, timeout: 0, false, "Starting a callback is insufficient")
         readiness.completeCallback(valid, valid: true)
-        XCTAssertTrue(readiness.wait(after: token, timeout: 0))
+        await assertWait(readiness, after: token, timeout: 0, true)
         readiness.completeCallback(readiness.beginCallback(), valid: false)
-        XCTAssertFalse(readiness.wait(after: token, timeout: 0), "A subsequent failure invalidates old success")
+        await assertWait(readiness, after: token, timeout: 0, false, "A subsequent failure invalidates old success")
     }
 
     func testMonoAndInterleavedStereoOutputLayouts() throws {
@@ -90,14 +95,14 @@ final class RouterCaptureReadinessTests: XCTestCase {
         }
     }
 
-    func testNoCallbackTimesOutAndInvalidTimeoutIsRejected() {
+    func testNoCallbackTimesOutAndInvalidTimeoutIsRejected() async {
         let readiness = RouterAggregate.CaptureReadiness()
         let start = ContinuousClock.now
-        XCTAssertFalse(readiness.wait(after: 0, timeout: 0.002))
+        await assertWait(readiness, after: 0, timeout: 0.002, false)
         XCTAssertLessThan(start.duration(to: .now), .seconds(1))
-        XCTAssertFalse(readiness.wait(after: 0, timeout: .infinity))
-        XCTAssertFalse(readiness.wait(after: 0, timeout: -.infinity))
-        XCTAssertFalse(readiness.wait(after: 0, timeout: .nan))
+        await assertWait(readiness, after: 0, timeout: .infinity, false)
+        await assertWait(readiness, after: 0, timeout: -.infinity, false)
+        await assertWait(readiness, after: 0, timeout: .nan, false)
     }
 
     func testSilentAndInactiveSourcesRetainExpectedInputLayout() {

@@ -1,13 +1,12 @@
 import Foundation
 
-/// Raw level of one source (mix-independent, pre-fader): what the source's tap is
-/// producing right now.
-public struct RouterSourceMeter: Sendable, Identifiable, Equatable {
-    public let id: String          // Source.id
+/// dBFS level with per-channel detail; mono callers pass `level` only.
+public struct LevelMeter: Sendable, Identifiable, Equatable {
+    public let id: String
     public let name: String
-    public let level: Float        // dBFS
-    public let levelLeft: Float    // dBFS
-    public let levelRight: Float   // dBFS
+    public let level: Float
+    public let levelLeft: Float
+    public let levelRight: Float
 
     public init(id: String, name: String, level: Float, levelLeft: Float? = nil, levelRight: Float? = nil) {
         self.id = id
@@ -18,22 +17,10 @@ public struct RouterSourceMeter: Sendable, Identifiable, Equatable {
     }
 }
 
-/// Post-sum, post-master output level of one mix's destination.
-public struct MixMeter: Sendable, Identifiable, Equatable {
-    public let id: String          // Mix.id
-    public let name: String
-    public let level: Float        // dBFS
-    public let levelLeft: Float    // dBFS
-    public let levelRight: Float   // dBFS
-
-    public init(id: String, name: String, level: Float, levelLeft: Float? = nil, levelRight: Float? = nil) {
-        self.id = id
-        self.name = name
-        self.level = level
-        self.levelLeft = levelLeft ?? level
-        self.levelRight = levelRight ?? level
-    }
-}
+/// Pre-fader level of one source's tap.
+public typealias RouterSourceMeter = LevelMeter
+/// Post-sum, post-master level of one mix.
+public typealias MixMeter = LevelMeter
 
 public struct RouterSnapshot: Sendable, Equatable {
     public let sources: [RouterSourceMeter]

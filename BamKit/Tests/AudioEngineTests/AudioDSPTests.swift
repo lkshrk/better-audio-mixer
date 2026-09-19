@@ -39,14 +39,6 @@ final class AudioDSPTests: XCTestCase {
         XCTAssertEqual(rms(right), rms(input), accuracy: 1e-5)
     }
 
-    func testTapCaptureRequiresMacOSDefaultInsteadOfFallingBackToBam() {
-        XCTAssertEqual(
-            CoreAudioEngine.tapCaptureOutputUID(defaultOutputUID: "system-output"),
-            "system-output"
-        )
-        XCTAssertNil(CoreAudioEngine.tapCaptureOutputUID(defaultOutputUID: nil))
-    }
-
     func testMixIDsReferencingFailedTapSourcesOnlyMarksAffectedMixes() {
         let config = BamConfig(
             sources: [

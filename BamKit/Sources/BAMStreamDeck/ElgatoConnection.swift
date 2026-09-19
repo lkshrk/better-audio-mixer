@@ -3,7 +3,6 @@ import Foundation
 @MainActor
 protocol ElgatoCommandSink: AnyObject {
     func setTitle(_ title: String, context: String)
-    func setState(_ state: Int, context: String)
     func showAlert(context: String)
     func setImage(_ image: String?, context: String)
     func setGlobalSettings(_ payload: [String: Any])
@@ -12,10 +11,7 @@ protocol ElgatoCommandSink: AnyObject {
     func setFeedbackLayout(_ layout: String, context: String)
 }
 
-/// Speaks the Elgato Stream Deck WebSocket protocol: connects to the local
-/// `ws://127.0.0.1:<port>`, registers the plugin, and forwards inbound events
-/// (`willAppear`, `keyDown`, …) to `onEvent`. Hand-rolled over
-/// `URLSessionWebSocketTask` — there is no official Swift SDK.
+/// Elgato WebSocket protocol over `URLSessionWebSocketTask` (there is no official Swift SDK).
 @MainActor
 final class ElgatoConnection: ElgatoCommandSink {
     private let registration: ElgatoRegistration
@@ -65,16 +61,11 @@ final class ElgatoConnection: ElgatoCommandSink {
               "payload": ["title": title, "target": 0]])
     }
 
-    func setState(_ state: Int, context: String) {
-        send(["event": "setState", "context": context, "payload": ["state": state]])
-    }
-
     func showAlert(context: String) {
         send(["event": "showAlert", "context": context])
     }
 
-    /// `image` is a full data URI ("data:image/png;base64,…") or nil to clear back
-    /// to the manifest icon.
+    /// `image` is a full data URI, or nil to fall back to the manifest icon.
     func setImage(_ image: String?, context: String) {
         send(["event": "setImage", "context": context,
               "payload": ["image": image as Any, "target": 0]])
@@ -97,8 +88,7 @@ final class ElgatoConnection: ElgatoCommandSink {
         send(["event": "setFeedbackLayout", "context": context, "payload": ["layout": layout]])
     }
 
-    /// One-shot receive that re-arms itself. The completion runs off-actor, so we
-    /// extract the (Sendable) String there and hop back to the main actor to decode.
+    /// The completion runs off-actor, so only the Sendable String crosses back to the main actor.
     private func receive() {
         task?.receive { [weak self] result in
             let text: String?
@@ -107,8 +97,9 @@ final class ElgatoConnection: ElgatoCommandSink {
             case .success(.data(let d)):   text = String(data: d, encoding: .utf8)
             case .success:                 text = nil
             case .failure(let error):
-                Log.error("WS receive: \(error.localizedDescription)")
-                return
+                // Stream Deck relaunches the plugin; lingering without a socket would leave dead keys.
+                Log.error("WS receive: \(error.localizedDescription); exiting")
+                exit(0)
             }
             Task { @MainActor in
                 guard let self else { return }

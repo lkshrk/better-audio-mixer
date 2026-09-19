@@ -4,14 +4,12 @@ import SwiftUI
 
 // MARK: - Theme tokens
 
-/// The BAM design token set, resolved for dark or light. Mirrors `buildTheme`
-/// in the design handoff (shared.jsx).
+/// The BAM design token set; mirrors `buildTheme` in the design handoff (shared.jsx).
 struct Theme {
     var dark: Bool
     var accent: Color
     var accentInk: Color
     var glow: Color
-    var soft: Color
     var bg: Color
     var bar: Color
     var panel: Color
@@ -28,12 +26,15 @@ struct Theme {
     var gap: CGFloat
 
     static let accentHex = Color(hex: "c084fc")
+    static let danger = Color(hex: "ff5b5b")
+    static let warning = Color(hex: "f2b84b")
+    static let standard = make(dark: true)
 
     static func make(dark: Bool) -> Theme {
         dark
             ? Theme(
                 dark: true, accent: accentHex, accentInk: Color(hex: "1a1020"),
-                glow: accentHex.opacity(0.45), soft: accentHex.opacity(0.16),
+                glow: accentHex.opacity(0.45),
                 bg: Color(hex: "17161c"), bar: Color(hex: "1b1a20"),
                 panel: Color(hex: "17161c"), surface: Color(hex: "222129"),
                 surface2: Color(hex: "26242e"), sink: Color(hex: "121216"),
@@ -43,7 +44,7 @@ struct Theme {
                 stripW: 108, gap: 12)
             : Theme(
                 dark: false, accent: accentHex, accentInk: .white,
-                glow: accentHex.opacity(0.28), soft: accentHex.opacity(0.14),
+                glow: accentHex.opacity(0.28),
                 bg: Color(hex: "ececef"), bar: Color(hex: "f4f4f6"),
                 panel: Color(hex: "f6f6f8"), surface: .white,
                 surface2: .white, sink: Color(hex: "e7e7ea"),
@@ -54,7 +55,7 @@ struct Theme {
     }
 }
 
-private struct ThemeKey: EnvironmentKey { static let defaultValue = Theme.make(dark: true) }
+private struct ThemeKey: EnvironmentKey { static let defaultValue = Theme.standard }
 extension EnvironmentValues {
     var theme: Theme {
         get { self[ThemeKey.self] }
@@ -110,70 +111,63 @@ enum Palette {
     static func color(forID id: String) -> Color { color(hue: hue(for: id)) }
 }
 
-enum Console {
-    static func destLabel(_ dest: MixDestination, devices: [AudioDevice]) -> String {
-        switch dest {
-        case .virtualSlot(let s): return "BAM \(s)"
-        case .hardware(let uid): return devices.first { $0.uid == uid }?.name ?? "Output"
-        }
-    }
-}
-
-/// dB label for a 0…1 linear fader value. 0.001 ⇒ −∞.
-func consoleDb(_ level: Double) -> String {
-    if level <= 0.001 { return "\u{2212}\u{221e}" }
-    let db = 20 * log10(level)
-    if db >= 0 { return String(format: "+%.1f", db) }
-    return String(format: "%.1f", db)
-}
-
 // MARK: - Meter
 
-/// LED-segment level meter. Vertical by default; horizontal for compact rows.
+/// Vertical LED-segment level meter.
 struct Meter: View {
-    @Environment(\.theme) private var t
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.theme) private var t
     let level: Float
+    var peak: Float = RMSMeter.floorDB
     var active: Bool = true
-    var width: CGFloat = 7
+    var width: CGFloat = 5
     var height: CGFloat = 150
-    var horizontal: Bool = false
 
-    private var segs: Int { max(8, Int(((horizontal ? width : height) / 9).rounded())) }
+    private static let low = Color(hex: "36d07a")
+    private static let mid = Color(hex: "ffcf4d")
+    private static let high = Theme.danger
+    @MainActor private static var cellColorCache: [Int: [Color]] = [:]
+
+    @MainActor private static func cellColors(segs: Int) -> [Color] {
+        if let cached = cellColorCache[segs] { return cached }
+        let colors = (0..<segs).map { idx -> Color in
+            let frac = CGFloat(idx + 1) / CGFloat(segs)
+            return frac > 0.8 ? high : frac > 0.62 ? mid : low
+        }
+        cellColorCache[segs] = colors
+        return colors
+    }
+
+    private var segs: Int { max(8, Int((height / 9).rounded())) }
 
     var body: some View {
         let frac = active ? CGFloat(RMSMeter.fraction(dbFS: level)) : 0
+        let peakFrac = active ? CGFloat(RMSMeter.fraction(dbFS: peak)) : 0
         let lit = Int((CGFloat(segs) * frac).rounded(.up))
-        Group {
-            if horizontal {
-                HStack(spacing: 1.5) { cells(lit) }
-            } else {
-                VStack(spacing: 1.5) { cells(lit, reversed: true) }
+        let colors = Self.cellColors(segs: segs)
+        VStack(spacing: 1.5) {
+            ForEach((0..<segs).reversed(), id: \.self) { idx in
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(colors[idx])
+                    .opacity(idx < lit ? 1 : 0.12)
+                    // Fast attack, gentle release: avoids flicker at segment boundaries.
+                    .animation(reduceMotion || !active ? nil : .easeOut(duration: idx < lit ? 0.04 : 0.22),
+                               value: idx < lit)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .padding(1.5)
-        .frame(width: horizontal ? height : width, height: horizontal ? width : height)
-    }
-
-    @ViewBuilder private func cells(_ lit: Int, reversed: Bool = false) -> some View {
-        ForEach(0..<segs, id: \.self) { i in
-            let idx = reversed ? segs - 1 - i : i
-            let frac = CGFloat(idx + 1) / CGFloat(segs)
-            let c: Color = frac > 0.8 ? Color(hex: "ff5b5b")
-                : frac > 0.62 ? Color(hex: "ffcf4d") : Color(hex: "36d07a")
-            RoundedRectangle(cornerRadius: 1.5)
-                .fill(c)
-                .opacity(idx < lit ? 1 : 0.12)
-                // Fast peaks, gentle release: avoid hard flicker at segment boundaries.
-                .animation(reduceMotion || !active ? nil : .easeOut(duration: idx < lit ? 0.04 : 0.22),
-                           value: idx < lit)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(width: width, height: height)
+        .overlay(alignment: .bottom) {
+            if peakFrac > 0 {
+                RoundedRectangle(cornerRadius: 0.5)
+                    .fill(peakFrac > 0.8 ? Self.high : t.accent)
+                    .frame(width: width, height: 2)
+                    .offset(y: -(0.5 + (height - 3) * peakFrac))
+            }
         }
     }
 }
-
-// MARK: - Volume taper
-// AudioTaper is defined in BamCore (public). ConsoleTheme gets it via `import BamCore`.
 
 // MARK: - Fader
 
@@ -182,43 +176,74 @@ struct Fader: View {
     @Binding var value: Double
     var accentTrack: Bool = true
     var disabled: Bool = false
+    var dimmed: Bool = false
     var height: CGFloat = 150
-    /// When true the slider position maps 1:1 to `value` (no cube taper). Used by
-    /// the master strip, where `value` is the hardware device's volume scalar —
-    /// already perceptual — rather than a raw linear router gain.
+    /// Position maps 1:1 to `value` (no cube taper); the master strip's hardware scalar is already perceptual.
     var linear: Bool = false
+    var accessibilityLabel: String = "Level"
+    /// Throttled live value during the drag; `onCommit` fires once on release.
+    var onChange: (Double) -> Void = { _ in }
     var onCommit: () -> Void = {}
 
+    @State private var lastChange: TimeInterval = 0
     private let cap = CGSize(width: 22, height: 18)
+
+    private var percent: Int {
+        linear ? Int((min(1, max(0, value)) * 100).rounded()) : AudioTaper.percent(fromGain: value)
+    }
 
     var body: some View {
         GeometryReader { geo in
             let h = geo.size.height
             let v = CGFloat(linear ? min(1, max(0, value)) : AudioTaper.position(fromGain: value))
             ZStack(alignment: .bottom) {
-                Capsule().fill(t.sink).frame(width: 4)
+                Capsule().fill(t.sink).frame(width: 6)
                     .overlay(Capsule().stroke(t.line, lineWidth: 1))
                 Capsule()
                     .fill(accentTrack ? t.accent : t.ghost)
-                    .frame(width: 4, height: max(0, (h - cap.height) * v) + cap.height / 2)
+                    .frame(width: 6, height: max(0, (h - cap.height) * v) + cap.height / 2)
                     .shadow(color: accentTrack ? t.glow : .clear, radius: 5)
                 capView
                     .offset(y: -(h - cap.height) * v)
             }
             .frame(maxWidth: .infinity)
             .contentShape(Rectangle())
-            .opacity(disabled ? 0.35 : 1)
+            .opacity(disabled ? 0.35 : dimmed ? 0.45 : 1)
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { g in
                         guard !disabled else { return }
                         let p = 1 - Double((g.location.y - cap.height / 2) / (h - cap.height))
                         value = linear ? min(1, max(0, p)) : AudioTaper.gain(fromPosition: p)
+                        let now = Date.timeIntervalSinceReferenceDate
+                        guard now - lastChange >= Tuning.faderChangeInterval else { return }
+                        lastChange = now
+                        onChange(value)
                     }
-                    .onEnded { _ in if !disabled { onCommit() } }
+                    .onEnded { _ in
+                        guard !disabled else { return }
+                        lastChange = 0
+                        onCommit()
+                    }
             )
         }
         .frame(width: 26, height: height)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityValue("\(percent) percent")
+        .accessibilityAdjustableAction { direction in
+            nudge(by: direction == .increment ? 0.05 : -0.05)
+        }
+    }
+
+    /// Moves the perceptual position by `delta` and routes it through the drag path.
+    func nudge(by delta: Double) {
+        guard !disabled else { return }
+        let pos = linear ? min(1, max(0, value)) : AudioTaper.position(fromGain: value)
+        let next = min(1, max(0, pos + delta))
+        value = linear ? next : AudioTaper.gain(fromPosition: next)
+        onChange(value)
+        onCommit()
     }
 
     private var capView: some View {
@@ -236,70 +261,9 @@ struct Fader: View {
     }
 }
 
-// MARK: - Knob
-
-struct Knob: View {
-    @Environment(\.theme) private var t
-    @Binding var value: Double
-    var size: CGFloat = 38
-    var disabled: Bool = false
-    var onCommit: () -> Void = {}
-
-    @State private var dragStart: Double?
-
-    private var angle: Double { -135 + value * 270 }
-
-    var body: some View {
-        let v = CGFloat(min(1, max(0, value)))
-        ZStack {
-            Circle().trim(from: 0, to: 0.75)
-                .stroke(t.sink, style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                .rotationEffect(.degrees(135))
-            Circle().trim(from: 0, to: 0.75 * v)
-                .stroke(disabled ? t.ghost : t.accent,
-                        style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                .rotationEffect(.degrees(135))
-                .shadow(color: disabled ? .clear : t.glow, radius: 4)
-            knobBody
-        }
-        .frame(width: size, height: size)
-        .opacity(disabled ? 0.3 : 1)
-        .contentShape(Circle())
-        .gesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { g in
-                    guard !disabled else { return }
-                    if dragStart == nil { dragStart = value }
-                    let nv = (dragStart ?? value) + Double(-g.translation.height / 180)
-                    value = min(1, max(0, nv))
-                }
-                .onEnded { _ in dragStart = nil; if !disabled { onCommit() } }
-        )
-    }
-
-    private var knobBody: some View {
-        ZStack(alignment: .top) {
-            Circle()
-                .fill(RadialGradient(
-                    colors: t.dark ? [Color(hex: "33333d"), Color(hex: "1f1f26")]
-                                   : [.white, Color(hex: "eaeaef")],
-                    center: .init(x: 0.5, y: 0.25), startRadius: 0, endRadius: size * 0.6))
-                .overlay(Circle().stroke(t.line2, lineWidth: 0.5))
-            Capsule()
-                .fill(disabled ? t.faint : t.accent)
-                .frame(width: 2, height: size * 0.22)
-                .padding(.top, 4)
-                .rotationEffect(.degrees(angle))
-        }
-        .padding(7)
-    }
-}
-
 // MARK: - Device icon glyph
 
-/// A device icon value is stored in one `String?` field. An ASCII value is an SF
-/// Symbol name (line glyph, e.g. "headphones"); a non-ASCII value is a real emoji
-/// grapheme. `nil` falls back to the colored monogram chip.
+/// An ASCII icon value is an SF Symbol name; a non-ASCII value is an emoji grapheme; nil is the monogram chip.
 enum DeviceIcon {
     static func isSymbol(_ s: String) -> Bool { s.unicodeScalars.first?.isASCII ?? false }
 }
@@ -385,8 +349,7 @@ enum AppIconCache {
     }
 }
 
-/// The real app icon for a bundle id; falls back to a `Chip` monogram when the
-/// app isn't installed/resolvable.
+/// The real app icon for a bundle id; falls back to a `Chip` monogram when unresolvable.
 struct AppIcon: View {
     let bundleID: String
     let fallbackMono: String
@@ -427,24 +390,24 @@ struct IconBtn: View {
                 .frame(width: size, height: size * 0.84)
                 .background(
                     RoundedRectangle(cornerRadius: 7)
-                        .fill(active ? (danger ? Color(hex: "ff5b5b") : t.accent) : t.surface2))
+                        .fill(active ? (danger ? Theme.danger : t.accent) : t.surface2))
                 .overlay(RoundedRectangle(cornerRadius: 7)
                     .stroke(active ? .clear : t.line2, lineWidth: 0.5))
-                .shadow(color: active ? (danger ? Color(hex: "ff5b5b").opacity(0.4) : t.glow) : .clear,
+                .shadow(color: active ? (danger ? Theme.danger.opacity(0.4) : t.glow) : .clear,
                         radius: 6)
         }
         .buttonStyle(.plain)
     }
 }
 
-struct Pill: View {
+struct Pill<Content: View>: View {
     @Environment(\.theme) private var t
     var tone: Color? = nil
-    let content: AnyView
+    let content: Content
 
-    init(tone: Color? = nil, @ViewBuilder _ content: () -> some View) {
+    init(tone: Color? = nil, @ViewBuilder _ content: () -> Content) {
         self.tone = tone
-        self.content = AnyView(content())
+        self.content = content()
     }
 
     var body: some View {
@@ -455,41 +418,5 @@ struct Pill: View {
             .frame(height: 22)
             .background(Capsule().fill(tone?.opacity(0.16) ?? t.surface2))
             .overlay(Capsule().stroke(tone?.opacity(0.3) ?? t.line2, lineWidth: 0.5))
-    }
-}
-
-struct Tag: View {
-    @Environment(\.theme) private var t
-    let text: String
-    var tone: Color? = nil
-
-    var body: some View {
-        Text(text.uppercased())
-            .font(.system(size: 10, weight: .semibold, design: .monospaced))
-            .tracking(0.4)
-            .foregroundStyle(tone ?? t.faint)
-    }
-}
-
-/// The BAM app glyph: three white bars on an accent gradient tile.
-struct BamMark: View {
-    @Environment(\.theme) private var t
-    var size: CGFloat = 20
-
-    var body: some View {
-        HStack(spacing: size * 0.085) {
-            ForEach([0.4, 0.62, 0.4], id: \.self) { h in
-                RoundedRectangle(cornerRadius: size * 0.06)
-                    .fill(.white)
-                    .frame(width: size * 0.1, height: size * h)
-            }
-        }
-        .frame(width: size, height: size)
-        .background(
-            RoundedRectangle(cornerRadius: size * 0.26)
-                .fill(LinearGradient(
-                    colors: [t.accent.shaded(45), t.accent, t.accent.shaded(-58)],
-                    startPoint: .topLeading, endPoint: .bottomTrailing)))
-        .shadow(color: .black.opacity(0.4), radius: 1.5, y: 1)
     }
 }

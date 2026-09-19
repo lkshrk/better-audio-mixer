@@ -70,6 +70,20 @@ final class RouterRecoveryPolicyTests: XCTestCase {
         XCTAssertNil(p.pausedUntil(for: .outputFormatDrift))
     }
 
+    func testExpiredPauseRestoresBudgetWhenCooldownIsShorterThanWindow() {
+        var p = RouterRecoveryPolicy(maxAttempts: 1, window: 100, cooldown: 10)
+        let t0 = Date(timeIntervalSince1970: 0)
+        _ = p.recordAttempt(reason: .aggregateStalled, now: t0)
+        guard case .paused = p.recordAttempt(reason: .aggregateStalled, now: t0.addingTimeInterval(5)) else {
+            XCTFail("expected paused"); return
+        }
+        XCTAssertEqual(p.recordAttempt(reason: .aggregateStalled, now: t0.addingTimeInterval(20)), .attempting(
+            reason: "aggregateStalled",
+            attempt: 1
+        ))
+        XCTAssertNil(p.pausedUntil(for: .aggregateStalled))
+    }
+
     func testResetClearsAllReasons() {
         var p = RouterRecoveryPolicy(maxAttempts: 1, window: 100, cooldown: 300)
         let t0 = Date(timeIntervalSince1970: 0)

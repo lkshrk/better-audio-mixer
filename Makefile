@@ -12,7 +12,7 @@ INSTALL_DIR := /Applications
 # on launch and a stuck-high level has hurt before — keep this low.
 SAFE_VOLUME := 12
 
-.PHONY: all generate build test install install-streamdeck install-streamdeck-fast release clean
+.PHONY: all generate build test test-live install install-streamdeck install-streamdeck-fast release clean
 
 all: build
 
@@ -34,6 +34,16 @@ test: generate
 	xcodebuild -project bam.xcodeproj -scheme $(SCHEME) \
 		-configuration Debug -derivedDataPath $(DERIVED_DEV) \
 		CODE_SIGNING_ALLOWED=NO -onlyUsePackageVersionsFromResolvedFile test
+
+## test-live: opt-in tests against the real CoreAudio HAL (quit bam first; volume is forced low)
+test-live: generate
+	@pgrep -x bam >/dev/null && { echo "quit bam first"; exit 1; } || true
+	@osascript -e 'set volume output volume 8'
+	BAM_LIVE=1 BAM_SMOKE=1 swift test --package-path BamKit --force-resolved-versions --filter "Live|Smoke"
+	xcodebuild -project bam.xcodeproj -scheme $(SCHEME) \
+		-configuration Debug -derivedDataPath $(DERIVED_DEV) \
+		CODE_SIGNING_ALLOWED=NO -onlyUsePackageVersionsFromResolvedFile \
+		TEST_RUNNER_BAM_LIVE=1 -only-testing:bamTests/LiveExitPathTests test
 
 ## install: release build → /Applications, lowering volume before relaunch
 install: generate

@@ -22,6 +22,30 @@ final class ClientTransportTests: XCTestCase {
         XCTAssertEqual(client.lastSendError, EBADF)
         XCTAssertFalse(client.peerClosedDuringSend)
     }
+
+    func testWouldBlockDropsFramesInsteadOfBlocking() {
+        var fds: [Int32] = [-1, -1]
+        XCTAssertEqual(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds), 0)
+        guard fds[0] >= 0, fds[1] >= 0 else { return }
+        defer { Darwin.close(fds[0]); Darwin.close(fds[1]) }
+        _ = fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK)
+        let client = Client(fd: fds[0])
+        let big = Data(repeating: 0x20, count: 256 * 1024)
+        for _ in 0..<8 where client.consecutiveDrops == 0 {
+            XCTAssertTrue(client.sendFrame(big))
+        }
+        XCTAssertGreaterThan(client.consecutiveDrops, 0)
+        XCTAssertNil(client.lastSendError)
+    }
+
+    func testEncodeFailureReturnsFalse() {
+        var fds: [Int32] = [-1, -1]
+        XCTAssertEqual(socketpair(AF_UNIX, SOCK_STREAM, 0, &fds), 0)
+        guard fds[0] >= 0, fds[1] >= 0 else { return }
+        defer { Darwin.close(fds[0]); Darwin.close(fds[1]) }
+        let client = Client(fd: fds[0])
+        XCTAssertFalse(client.send(["t": Date()]))
+    }
 }
 
 // MARK: - Test fixture helpers
@@ -245,6 +269,16 @@ final class MockMixerControlTests: XCTestCase {
         XCTAssertTrue(mock.setOutputDevice(uid: "B"))
         XCTAssertEqual(mock.listOutputs().first(where: { $0.active })?.uid, "B")
     }
+
+    func testSetOutputDevicePreservesIcons() {
+        let mock = MockMixerControl(outputs: [
+            OutputSnapshot(uid: "A", name: "Speakers", active: true, icon: "hifispeaker.fill"),
+            OutputSnapshot(uid: "B", name: "Headphones", active: false, icon: "headphones"),
+        ])
+        mock.outputSwitchSupported = true
+        XCTAssertTrue(mock.setOutputDevice(uid: "B"))
+        XCTAssertEqual(mock.listOutputs().map(\.icon), ["hifispeaker.fill", "headphones"])
+    }
 }
 
 // MARK: - ControlServer wire-protocol tests
@@ -297,6 +331,8 @@ final class ControlServerTests: XCTestCase {
         let sockPath = testSockPath!
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw NSError(domain: "connect", code: Int(errno)) }
+        var one: Int32 = 1
+        _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         let pathBytes = sockPath.utf8CString
@@ -528,7 +564,8 @@ final class ControlServerTests: XCTestCase {
         let (fd2, buf2) = try await handshake(client: "deck2")
         defer { Darwin.close(fd1); Darwin.close(fd2) }
 
-        // Both receive meter frames from the shared timer
+        mock.setPos(mixID: "m-game", pos: 0.4)
+        pushSnapshot()
         let m1 = try await readFrameOfType(fd1, buf: buf1, type: "meter")
         let m2 = try await readFrameOfType(fd2, buf: buf2, type: "meter")
         XCTAssertEqual(m1["t"] as? String, "meter")
@@ -539,7 +576,8 @@ final class ControlServerTests: XCTestCase {
         let (fd, _) = try await handshake(client: "dying")
         Darwin.close(fd) // close without notifying server
 
-        // Wait for at least one meter tick to hit EPIPE and prune
+        mock.setPos(mixID: "m-game", pos: 0.4)
+        pushSnapshot()
         try await Task.sleep(for: .milliseconds(500))
 
         // Server should still accept new connections (not crashed/deadlocked)
@@ -623,5 +661,160 @@ final class ControlServerTests: XCTestCase {
                f["t"] as? String == "delta" { sawDelta = true; break }
         }
         XCTAssertFalse(sawDelta, "No delta expected when pos/mute unchanged")
+    }
+
+    func testUnchangedSnapshotSendsNothing() async throws {
+        let (fd, buf) = try await handshake()
+        defer { Darwin.close(fd) }
+        _ = try await readFrameOfType(fd, buf: buf, type: "meter")
+
+        var extra = 0
+        for _ in 0..<5 {
+            if (try? await readFrame(fd, buf: buf, timeout: 0.1)) != nil { extra += 1 }
+        }
+        XCTAssertEqual(extra, 0, "identical snapshot must not be re-broadcast")
+
+        mock.setPos(mixID: "m-game", pos: 0.4)
+        pushSnapshot()
+        _ = try await readFrameOfType(fd, buf: buf, type: "meter")
+    }
+
+    func testAddedMixIsAnnounced() async throws {
+        let (fd, buf) = try await handshake()
+        defer { Darwin.close(fd) }
+        _ = try await readFrameOfType(fd, buf: buf, type: "meter")
+
+        mock.mixes.append(makeMix(id: "m-chat", name: "Chat", emoji: "💬", pos: 0.25))
+        pushSnapshot()
+
+        let state = try await readFrameOfType(fd, buf: buf, type: "state")
+        XCTAssertEqual((state["mixes"] as? [[String: Any]])?.map { $0["id"] as? String }, ["m-game", "m-chat"])
+        let added = try await readFrameOfType(fd, buf: buf, type: "added")
+        XCTAssertEqual(added["mix"] as? String, "m-chat")
+        XCTAssertEqual(added["name"] as? String, "Chat")
+        XCTAssertEqual(added["pos"] as? Double, 0.25)
+        XCTAssertEqual(added["pct"] as? Int, 25)
+    }
+
+    func testClientThatStopsReadingIsEvicted() async throws {
+        server.stopSync()
+        server.maxConsecutiveDrops = 3
+        server.startSync()
+        mock.mixes = (0..<60).map { makeMix(id: "m\($0)", name: "Mix \($0)") }
+        pushSnapshot()
+        let (fd, _) = try await handshake(client: "sleepy")
+        defer { Darwin.close(fd) }
+
+        let deadline = ContinuousClock.now + .seconds(5)
+        var step = 0
+        while server.diagnosticsSnapshot().slowClientEvictions == 0, ContinuousClock.now < deadline {
+            step += 1
+            mock.setPos(mixID: "m0", pos: Double(step % 100) / 100)
+            pushSnapshot()
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let d = server.diagnosticsSnapshot()
+        XCTAssertEqual(d.slowClientEvictions, 1)
+        XCTAssertGreaterThanOrEqual(d.droppedFrames, 3)
+        XCTAssertEqual(d.activeClients, 0)
+
+        let (fd2, _) = try await handshake(client: "alive")
+        Darwin.close(fd2)
+    }
+
+    func testClientWithoutHandshakeIsDroppedAfterTimeout() async throws {
+        server.stopSync()
+        server.handshakeTimeout = .milliseconds(200)
+        server.startSync()
+        let fd = try connectFD()
+        defer { Darwin.close(fd) }
+
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertEqual(server.diagnosticsSnapshot().activeClients, 1)
+        try await waitForCommand { server.diagnosticsSnapshot().handshakeTimeouts == 1 }
+        let d = server.diagnosticsSnapshot()
+        XCTAssertEqual(d.handshakeTimeouts, 1)
+        XCTAssertEqual(d.activeClients, 0)
+        var tmp = [UInt8](repeating: 0, count: 8)
+        XCTAssertEqual(Darwin.recv(fd, &tmp, tmp.count, MSG_DONTWAIT), 0, "peer must see EOF")
+    }
+
+    func testOversizedLineDropsClientAndCountsMalformed() async throws {
+        let fd = try connectFD()
+        defer { Darwin.close(fd) }
+        let junk = Data(repeating: 0x61, count: 80 * 1024)
+        junk.withUnsafeBytes { buf in
+            var sent = 0
+            while sent < buf.count {
+                let n = Darwin.send(fd, buf.baseAddress! + sent, buf.count - sent, 0)
+                if n <= 0 { break }
+                sent += n
+            }
+        }
+        try await waitForCommand { server.diagnosticsSnapshot().malformedFrames == 1 }
+        let d = server.diagnosticsSnapshot()
+        XCTAssertEqual(d.malformedFrames, 1)
+        XCTAssertEqual(d.activeClients, 0)
+    }
+
+    func testCommandsApplyInArrivalOrder() async throws {
+        let (fd, _) = try await handshake()
+        defer { Darwin.close(fd) }
+        let positions = (1...40).map { Double($0) / 64 }
+        for p in positions {
+            try writeLine(fd, ["t": "cmd", "op": "setPos", "mix": "m-game", "pos": p])
+        }
+        try await waitForCommand { mock.calls.count == positions.count }
+        XCTAssertEqual(mock.calls, positions.map { .setPos(mixID: "m-game", pos: $0) })
+    }
+
+    func testMasterWritesAreCoalescedWithinInterval() async throws {
+        server.stopSync()
+        server.masterWriteInterval = .milliseconds(300)
+        server.startSync()
+        let (fd, _) = try await handshake()
+        defer { Darwin.close(fd) }
+        for p in [0.1, 0.2, 0.3] {
+            try writeLine(fd, ["t": "cmd", "op": "setMasterPos", "pos": p])
+        }
+        try await waitForCommand { mock.calls.contains(.setMasterPos(pos: 0.3)) }
+        XCTAssertEqual(mock.calls, [.setMasterPos(pos: 0.1), .setMasterPos(pos: 0.3)])
+    }
+
+    func testMasterCeilingCapsSetMasterPos() async throws {
+        server.stopSync()
+        server.masterPosCeiling = 0.8
+        server.startSync()
+        let (fd, _) = try await handshake()
+        defer { Darwin.close(fd) }
+        try writeLine(fd, ["t": "cmd", "op": "setMasterPos", "pos": 1.0])
+        try await waitForCommand { !mock.calls.isEmpty }
+        XCTAssertEqual(mock.calls, [.setMasterPos(pos: 0.8)])
+    }
+
+    func testMasterCeilingCapsNudgeMasterPos() async throws {
+        server.stopSync()
+        server.masterPosCeiling = 0.8
+        server.startSync()
+        let (fd, _) = try await handshake()
+        defer { Darwin.close(fd) }
+        try writeLine(fd, ["t": "cmd", "op": "nudgeMasterPos", "delta": 0.5])
+        try await waitForCommand { !mock.calls.isEmpty }
+        XCTAssertEqual(mock.calls, [.setMasterPos(pos: 0.8)])
+        XCTAssertEqual(mock.controlSnapshot.master.pos, 0.8)
+    }
+
+    func testOverlongSocketPathDoesNotListen() {
+        let other = ControlServer()
+        other.socketPath = NSTemporaryDirectory() + String(repeating: "x", count: 120) + ".sock"
+        other.startSync()
+        XCTAssertFalse(other.diagnosticsSnapshot().isListening)
+        other.stopSync()
+    }
+
+    func testStopUnlinksSocketFile() {
+        XCTAssertTrue(FileManager.default.fileExists(atPath: testSockPath))
+        server.stopSync()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: testSockPath))
     }
 }

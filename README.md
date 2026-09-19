@@ -85,6 +85,9 @@ xcodebuild -project bam.xcodeproj -scheme bam -configuration Debug \
   -derivedDataPath .build test
 ```
 
+Live HAL tests (`BAM_LIVE=1` / `BAM_SMOKE=1`, otherwise skipped) drive the real default output: quit bam, play audio, then run `make test-live`.
+It forces the system volume to 8% first and every test restores the captured device state on teardown.
+
 ## Project layout
 
 | Path | What |
@@ -95,15 +98,9 @@ xcodebuild -project bam.xcodeproj -scheme bam -configuration Debug \
 | `BamKit/Sources/BamControlKit/` | Local control socket server (app ↔ plugin) |
 | `BamKit/Sources/BAMStreamDeck/` | Stream Deck plugin executable |
 | `StreamDeck/me.harke.better-audio-mixer.sdPlugin/` | Plugin bundle (manifest, PIs, layouts) |
-| `BAMDriver/` | Virtual audio driver (C) |
 | `project.yml` | XcodeGen project definition |
 
 ## License
 
 The bam app and BamKit are MIT licensed (see [LICENSE](LICENSE)).
 
-The virtual audio driver (`BAMDriver/`) is a derivative of
-[BlackHole](https://github.com/ExistentialAudio/BlackHole) and is licensed under
-GPL-3.0 (see [BAMDriver/LICENSE](BAMDriver/LICENSE) and
-`BAMDriver/LICENSE.BlackHole`). It is a separate program that bam talks to over
-the CoreAudio HAL, so the GPL does not extend to the MIT-licensed app.

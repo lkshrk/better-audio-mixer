@@ -33,7 +33,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "BAMStreamDeck",
-            dependencies: ["BamControlKit"]
+            dependencies: ["BamCore", "BamControlKit"]
         ),
         .testTarget(
             name: "BamCoreTests",

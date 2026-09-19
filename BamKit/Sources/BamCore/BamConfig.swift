@@ -6,8 +6,8 @@ public struct BamConfig: Sendable, Equatable, Codable {
     public var masterMuted: Bool
     public var sources: [Source]
     public var mixes: [Mix]
-    public var solo: String?                // Source.id, global single solo (Q14)
-    public var pans: [String: Double]       // Source.id → 0…1, global per source (Q11)
+    public var solo: String?                // Source.id, global single solo
+    public var pans: [String: Double]       // Source.id → 0…1, global per source
 
     public init(
         master: Double = 1.0,
@@ -40,9 +40,15 @@ public struct BamConfig: Sendable, Equatable, Codable {
     }
 
     public static func load(yaml: String) throws -> BamConfig {
-        let config = try YAMLDecoder().decode(BamConfig.self, from: yaml)
+        var config = try YAMLDecoder().decode(BamConfig.self, from: yaml)
+        config.pruneStalePans()
         try config.validate()
         return config
+    }
+
+    public mutating func pruneStalePans() {
+        let ids = Set(sources.map(\.id))
+        pans = pans.filter { ids.contains($0.key) }
     }
 
     public static func load(url: URL) throws -> BamConfig {
@@ -54,7 +60,24 @@ public struct BamConfig: Sendable, Equatable, Codable {
     }
 
     public func validate() throws {
+        try validateRanges()
         try validateRouting()
+    }
+
+    public func validateRanges() throws {
+        func inUnit(_ v: Double) -> Bool { v.isFinite && v >= 0 && v <= 1 }
+        guard inUnit(master) else { throw BamConfigError.masterOutOfRange(master) }
+        for mix in mixes {
+            guard inUnit(mix.level) else { throw BamConfigError.mixLevelOutOfRange(mix: mix.id, level: mix.level) }
+            for send in mix.sends where !inUnit(send.level) {
+                throw BamConfigError.sendLevelOutOfRange(mix: mix.id, source: send.source, level: send.level)
+            }
+        }
+        let idSet = Set(sources.map(\.id))
+        for (source, pan) in pans.sorted(by: { $0.key < $1.key }) {
+            guard idSet.contains(source) else { throw BamConfigError.unknownPanSource(source) }
+            guard inUnit(pan) else { throw BamConfigError.panOutOfRange(source: source, pan: pan) }
+        }
     }
 
     public func validateRouting() throws {
@@ -135,9 +158,24 @@ public enum BamConfigError: Error, Equatable, CustomStringConvertible {
     case duplicateAppAssignments([AppAssignmentConflict])
     case unknownSoloSource(String)
     case multipleRemainderSources([String])
+    case masterOutOfRange(Double)
+    case mixLevelOutOfRange(mix: String, level: Double)
+    case sendLevelOutOfRange(mix: String, source: String, level: Double)
+    case unknownPanSource(String)
+    case panOutOfRange(source: String, pan: Double)
 
     public var description: String {
         switch self {
+        case .masterOutOfRange(let v):
+            return "Master must be a number in 0…1; found: \(v)"
+        case .mixLevelOutOfRange(let mix, let level):
+            return "Mix \(mix) level must be a number in 0…1; found: \(level)"
+        case .sendLevelOutOfRange(let mix, let source, let level):
+            return "Mix \(mix) send \(source) level must be a number in 0…1; found: \(level)"
+        case .unknownPanSource(let id):
+            return "Pan references unknown source: \(id)"
+        case .panOutOfRange(let source, let pan):
+            return "Pan for \(source) must be a number in 0…1; found: \(pan)"
         case .duplicateSourceIDs(let ids):
             return "Duplicate source ids: \(ids.joined(separator: ", "))"
         case .duplicateMixIDs(let ids):

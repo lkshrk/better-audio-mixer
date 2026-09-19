@@ -1,29 +1,28 @@
 import AppKit
 import BamControlKit
+import BamCore
 import Foundation
 
-/// Connects to BAM's Unix-domain `control.sock`, performs the NDJSON hello
-/// handshake, and forwards every inbound frame to `onFrame`. If BAM is not
-/// running, auto-launches it via `NSWorkspace` and retries with backoff.
+/// NDJSON client for BAM's `control.sock`; reconnects with backoff, launches BAM only on user input.
 @MainActor
 final class UDSClient {
     private var fd: Int32 = -1
     private var readSource: DispatchSourceRead?
     private(set) var readBuffer = Data()
-    private var connected = false
+    private(set) var connected = false
     private var retryCount = 0
+    private var retryWork: DispatchWorkItem?
     private var launchAttempted = false
 
     /// Decoded NDJSON frame from BAM. Called on the main actor.
     var onFrame: (([String: Any]) -> Void)?
+    var onDisconnect: (() -> Void)?
 
-    private var socketPath: String {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory,
-                                                  in: .userDomainMask).first!
-        return appSupport.appendingPathComponent("me.harke.bam/control.sock").path
-    }
+    private var socketPath: String { BamPaths.controlSocketURL().path }
 
     func connect() {
+        retryWork?.cancel()
+        retryWork = nil
         guard !connected else { return }
 
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
@@ -47,7 +46,6 @@ final class UDSClient {
 
         guard result == 0 else {
             Darwin.close(fd)
-            launchBAMIfNeeded()
             scheduleRetry()
             return
         }
@@ -55,12 +53,36 @@ final class UDSClient {
         self.fd = fd
         connected = true
         retryCount = 0
+        launchAttempted = false
         Log.info("UDS connected")
         startReading()
         send(["t": "hello", "v": 1, "client": "streamdeck"])
     }
 
-    /// Send one NDJSON frame to BAM (cmd / listMixes). No-op if disconnected.
+    /// Drop the backoff and try immediately (BAM just launched).
+    func reconnectNow() {
+        retryCount = 0
+        connect()
+    }
+
+    /// Launch BAM at most once per disconnected period.
+    func launchBAMIfNeeded() {
+        guard !connected, !launchAttempted else { return }
+        launchAttempted = true
+        for id in ["me.harke.bam", "me.harke.bam.dev"] {
+            guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) else { continue }
+            let cfg = NSWorkspace.OpenConfiguration()
+            cfg.activates = false
+            NSWorkspace.shared.openApplication(at: url, configuration: cfg) { _, error in
+                if let error { Log.error("launch BAM: \(error.localizedDescription)") }
+            }
+            Log.info("launching BAM (\(id))")
+            return
+        }
+        Log.error("BAM app not found via NSWorkspace")
+    }
+
+    /// Send one NDJSON frame to BAM. No-op if disconnected.
     func send(_ obj: [String: Any]) { sendFrame(obj) }
 
     // MARK: - Read
@@ -89,17 +111,27 @@ final class UDSClient {
             let lineData = Data(readBuffer[readBuffer.startIndex ..< idx])
             readBuffer.removeSubrange(readBuffer.startIndex...idx)
             if lineData.isEmpty { continue }
-            guard let obj = try? decodeFrame(lineData) else { continue }
-            Log.info("UDS frame: \(obj["t"] as? String ?? "?")")
-            onFrame?(obj)
+            do {
+                let obj = try decodeFrame(lineData)
+                Log.info("UDS frame: \(obj["t"] as? String ?? "?")")
+                onFrame?(obj)
+            } catch {
+                Log.error("UDS decode: \(error.localizedDescription)")
+            }
         }
     }
 
     // MARK: - Write
 
     private func sendFrame(_ obj: [String: Any]) {
-        guard connected, let data = try? encodeFrame(obj) else { return }
-        var line = data
+        guard connected else { return }
+        var line: Data
+        do {
+            line = try encodeFrame(obj)
+        } catch {
+            Log.error("UDS encode \(obj["t"] as? String ?? "?"): \(error.localizedDescription)")
+            return
+        }
         line.append(0x0A)
         let ok = line.withUnsafeBytes { raw -> Bool in
             var sent = 0
@@ -124,30 +156,17 @@ final class UDSClient {
         connected = false
         readBuffer.removeAll()
         Log.info("UDS disconnected; retrying")
+        onDisconnect?()
         scheduleRetry()
     }
 
     private func scheduleRetry() {
         retryCount += 1
         let delay = min(0.5 * pow(2, Double(min(retryCount, 5))), 10.0)
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+        let work = DispatchWorkItem { [weak self] in
             MainActor.assumeIsolated { self?.connect() }
         }
-    }
-
-    private func launchBAMIfNeeded() {
-        guard !launchAttempted else { return }
-        launchAttempted = true
-        for id in ["me.harke.bam", "me.harke.bam.dev"] {
-            guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) else { continue }
-            let cfg = NSWorkspace.OpenConfiguration()
-            cfg.activates = false
-            NSWorkspace.shared.openApplication(at: url, configuration: cfg) { _, error in
-                if let error { Log.error("launch BAM: \(error.localizedDescription)") }
-            }
-            Log.info("launching BAM (\(id))")
-            return
-        }
-        Log.error("BAM app not found via NSWorkspace")
+        retryWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 }

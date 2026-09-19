@@ -2,10 +2,7 @@ import BamControlKit
 import BamCore
 import Foundation
 
-/// Bridges the live console model onto the `MixerControl` surface the Stream Deck
-/// `ControlServer` drives. A "mix" on the wire is a console *device* (`config.mixes`);
-/// per-device position uses the cube `AudioTaper`, while master volume passes through
-/// linear (the hardware scalar is already perceptual).
+/// Stream Deck surface: device positions use the cube `AudioTaper`; master passes through linear.
 extension ConsoleViewModel: MixerControl {
     func audioDiagnostics() async -> AudioDiagnostics? { await engine.audioDiagnostics() }
 
@@ -77,8 +74,6 @@ extension ConsoleViewModel: MixerControl {
         }
     }
 
-    /// Retargets the Default mix to the given hardware device — the same path the
-    /// in-app output picker uses (`setSystemOutput`). Rejects unknown/virtual UIDs.
     func setOutputDevice(uid: String) -> Bool {
         guard hardwareOutputDevices.contains(where: { $0.uid == uid }) else { return false }
         setSystemOutput(uid)

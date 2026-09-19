@@ -19,6 +19,7 @@ targets:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: Better Audio Mixer
+        NSHumanReadableCopyright: "© 2026 lkshrk. MIT License."
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         LSUIElement: true
@@ -59,28 +60,20 @@ targets:
       - path: AppTests
     dependencies:
       - target: bam
+      - package: BamKit
+        product: BamCore
+      - package: BamKit
+        product: AudioEngine
+      - package: BamKit
+        product: BamControlKit
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: me.harke.bamTests
         GENERATE_INFOPLIST_FILE: YES
         SWIFT_VERSION: "6.0"
-        TEST_HOST: ""
-        BUNDLE_LOADER: ""
-        LD_RUNPATH_SEARCH_PATHS:
-          - "$(inherited)"
-          - "\"$(BUILT_PRODUCTS_DIR)/bam dev.app/Contents/MacOS\""
-        HEADER_SEARCH_PATHS:
-          - "$(inherited)"
-          - "\"$(PROJECT_TEMP_DIR)/../../../SourcePackages/checkouts/Yams/Sources/CYaml/include\""
-          - "\"$(PROJECT_TEMP_DIR)/../../../SourcePackages/checkouts/swift-atomics/Sources/_AtomicsShims/include\""
-        OTHER_SWIFT_FLAGS:
-          - "$(inherited)"
-          - "-Xcc"
-          - "\"-fmodule-map-file=$(PROJECT_TEMP_DIR)/../../../SourcePackages/checkouts/Yams/Sources/CYaml/include/module.modulemap\""
-          - "-Xcc"
-          - "\"-fmodule-map-file=$(PROJECT_TEMP_DIR)/../../../SourcePackages/checkouts/swift-atomics/Sources/_AtomicsShims/include/module.modulemap\""
-        OTHER_LDFLAGS:
-          - "\"$(BUILT_PRODUCTS_DIR)/bam dev.app/Contents/MacOS/bam dev.debug.dylib\""
+      configs:
+        debug:
+          TEST_HOST: "$(BUILT_PRODUCTS_DIR)/bam dev.app/Contents/MacOS/bam dev"
 schemes:
   bam:
     build:

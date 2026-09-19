@@ -53,13 +53,28 @@ final class EnginePollingTests: XCTestCase {
         XCTAssertFalse(continued, "Old observations cannot recover or mutate the new route")
     }
 
-    func testPlayingIndicatorOnlyReadsMetadataForActiveProcesses() {
-        var metadataReads: [UInt32] = []
-        let playing = ProcessEnumerator.activeBundleIDs([1, 2, 3, 4, 5], isRunning: { $0 != 1 }, bundleID: {
-            metadataReads.append($0)
-            return $0 == 4 ? "" : $0 == 5 ? nil : "app"
-        })
-        XCTAssertEqual(playing, ["app"])
-        XCTAssertEqual(metadataReads, [2, 3, 4, 5])
+    func testPlayingIndicatorReadsMetadataOncePerObjectAndOnlyRunningFlagsAfterwards() {
+        let metadataReads = LockedList()
+        let runningReads = LockedList()
+        let cache = ProcessSnapshotCache(ttl: .zero, readers: .init(
+            objectIDs: { [1, 2, 3] },
+            info: { id in
+                metadataReads.append(id)
+                return AudioProcessInfo(objectID: id, pid: pid_t(id), bundleID: id == 3 ? "" : "app.\(id)", isRunningOutput: id != 1)
+            },
+            isRunningOutput: { id in runningReads.append(id); return id != 1 }))
+        let first = cache.snapshot().filter { $0.isRunningOutput && !$0.bundleID.isEmpty }.map(\.bundleID)
+        XCTAssertEqual(Set(first), ["app.2"])
+        XCTAssertEqual(metadataReads.values, [1, 2, 3])
+        _ = cache.snapshot(now: .now.advanced(by: .seconds(1)))
+        XCTAssertEqual(metadataReads.values, [1, 2, 3], "metadata is immutable for a live object and never re-read")
+        XCTAssertEqual(runningReads.values, [1, 2, 3], "a later poll re-reads only the running flag")
     }
+}
+
+private final class LockedList: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [UInt32] = []
+    var values: [UInt32] { lock.withLock { stored } }
+    func append(_ value: UInt32) { lock.withLock { stored.append(value) } }
 }

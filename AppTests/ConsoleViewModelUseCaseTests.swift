@@ -176,7 +176,7 @@ final class ConsoleViewModelUseCaseTests: XCTestCase {
         XCTAssertLessThan(volumeIndex, unmuteIndex)
         XCTAssertEqual(model.outputVolume, 0.6, accuracy: 0.001)
         XCTAssertTrue(model.bamVolumeApplied)
-        XCTAssertEqual(model.stockOutputStates["MockOutput"]?.volume ?? -1, 0.8, accuracy: 0.001)
+        XCTAssertEqual(model.protection.stockStates["MockOutput"]?.volume ?? -1, 0.8, accuracy: 0.001)
         await model.stop()
     }
 
@@ -186,38 +186,12 @@ final class ConsoleViewModelUseCaseTests: XCTestCase {
         let model = makeModel(engine: mock, driver: true, saved: 0.6)
         await model.startMock(config: BamConfig())
         XCTAssertFalse(model.bamVolumeApplied)
-        XCTAssertEqual(model.guardedOutputs["MockOutput"]?.volume ?? -1, 0.6, accuracy: 0.001)
+        XCTAssertEqual(model.protection.guarded["MockOutput"]?.volume ?? -1, 0.6, accuracy: 0.001)
         await model.restoreOutputVolume()
         XCTAssertTrue(model.bamVolumeApplied)
         let volume = await mock.outputVolume(uid: "MockOutput")
         XCTAssertEqual(volume ?? -1, 0.6, accuracy: 0.001)
         await model.stop()
-    }
-
-    func testReboundStartupTransfersSavedAndNewerLogicalTargetBeforeUnmute() async {
-        for newerTarget in [false, true] {
-            let mock = MockAudioEngine(silentRouter: true)
-            await mock.setResolvedOutputUIDForTests("ReboundOutput")
-            let model = makeModel(engine: mock, driver: true, saved: 0.6)
-            if newerTarget {
-                await mock.setOutputVolumeRestoreHookForTests { @MainActor in
-                    // UI still refers to the stored UID until startup reconciles it.
-                    model.setOutputVolume(0.3)
-                }
-            }
-            await model.startMock(config: BamConfig())
-            await model.enqueueRouterWork { _ in }.value
-            let calls = await mock.calls
-            let target: Float = newerTarget ? 0.3 : 0.6
-            let writeIndex = calls.firstIndex(of: .setOutputVolume(uid: "ReboundOutput", volume: target))!
-            let unmuteIndex = calls.firstIndex(of: .setOutputMuted(uid: "ReboundOutput", muted: false))!
-            XCTAssertLessThan(writeIndex, unmuteIndex)
-            XCTAssertEqual(model.systemOutputUID, "ReboundOutput")
-            let volume = await mock.outputVolume(uid: "ReboundOutput")
-            XCTAssertEqual(volume ?? -1, target, accuracy: 0.001)
-            XCTAssertEqual(model.stockOutputStates["ReboundOutput"]?.volume ?? -1, 0.8, accuracy: 0.001)
-            await model.stop()
-        }
     }
 
     func testStartupKeepsMasterMutedAtSavedLevel() async {

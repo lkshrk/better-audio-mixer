@@ -2,6 +2,23 @@ import XCTest
 @testable import AudioEngine
 
 final class DSPKernelTests: XCTestCase {
+    private func sumScaledScalar(src: UnsafePointer<Float>, stride: Int, gain: Float,
+                                 dst: UnsafeMutablePointer<Float>, dstStride: Int, frames: Int) {
+        for i in 0..<frames { dst[i * dstStride] += src[i * stride] * gain }
+    }
+
+    private func sumOfSquaresScalar(src: UnsafePointer<Float>, stride: Int, frames: Int) -> Float {
+        var acc: Float = 0
+        for i in 0..<frames { let s = src[i * stride]; acc += s * s }
+        return acc
+    }
+
+    private func peakMagnitudeScalar(_ buf: UnsafePointer<Float>, count: Int) -> Float {
+        var peak: Float = 0
+        for i in 0..<count { peak = max(peak, abs(buf[i])) }
+        return peak
+    }
+
     private func randomBuffer(_ n: Int, seed: UInt64) -> [Float] {
         var s = seed
         return (0..<n).map { _ in
@@ -18,7 +35,7 @@ final class DSPKernelTests: XCTestCase {
         var b = a
         src.withUnsafeBufferPointer { sp in
             a.withUnsafeMutableBufferPointer { ap in
-                DSPKernels.sumScaledScalar(src: sp.baseAddress!, stride: 1, gain: gain,
+                sumScaledScalar(src: sp.baseAddress!, stride: 1, gain: gain,
                                            dst: ap.baseAddress!, dstStride: 1, frames: frames)
             }
             b.withUnsafeMutableBufferPointer { bp in
@@ -32,7 +49,7 @@ final class DSPKernelTests: XCTestCase {
     func testSumOfSquaresMatches() {
         let src = randomBuffer(777, seed: 2)
         let (ss, vv): (Float, Float) = src.withUnsafeBufferPointer { sp in
-            (DSPKernels.sumOfSquaresScalar(src: sp.baseAddress!, stride: 1, frames: sp.count),
+            (sumOfSquaresScalar(src: sp.baseAddress!, stride: 1, frames: sp.count),
              DSPKernels.sumOfSquaresVDSP(src: sp.baseAddress!, stride: 1, frames: sp.count))
         }
         XCTAssertLessThan(abs(ss - vv) / max(1, ss), 1e-6)
@@ -41,7 +58,7 @@ final class DSPKernelTests: XCTestCase {
     func testPeakMatches() {
         let src = randomBuffer(1024, seed: 3)
         let (ps, pv): (Float, Float) = src.withUnsafeBufferPointer { sp in
-            (DSPKernels.peakMagnitudeScalar(sp.baseAddress!, count: sp.count),
+            (peakMagnitudeScalar(sp.baseAddress!, count: sp.count),
              DSPKernels.peakMagnitudeVDSP(sp.baseAddress!, count: sp.count))
         }
         XCTAssertEqual(ps, pv, accuracy: 1e-6)
@@ -71,7 +88,7 @@ final class DSPKernelTests: XCTestCase {
             let srcBase = sp.baseAddress!
             dstA.withUnsafeMutableBufferPointer { ap in
                 // read L lane (stride 2), write L lane (dstStride 2)
-                DSPKernels.sumScaledScalar(src: srcBase, stride: 2, gain: gain,
+                sumScaledScalar(src: srcBase, stride: 2, gain: gain,
                                            dst: ap.baseAddress!, dstStride: 2, frames: frames)
             }
             dstB.withUnsafeMutableBufferPointer { bp in
@@ -94,7 +111,7 @@ final class DSPKernelTests: XCTestCase {
         let frames = 256
         let interleaved = randomBuffer(frames * 2, seed: 8)
         let (ss, vv): (Float, Float) = interleaved.withUnsafeBufferPointer { sp in
-            (DSPKernels.sumOfSquaresScalar(src: sp.baseAddress!, stride: 2, frames: frames),
+            (sumOfSquaresScalar(src: sp.baseAddress!, stride: 2, frames: frames),
              DSPKernels.sumOfSquaresVDSP(src: sp.baseAddress!, stride: 2, frames: frames))
         }
         XCTAssertLessThan(abs(ss - vv) / max(1, ss), 1e-6)

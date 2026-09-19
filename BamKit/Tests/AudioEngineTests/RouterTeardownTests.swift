@@ -27,7 +27,7 @@ final class RouterTeardownTests: XCTestCase {
 
     func testCallbackOwnsFadeStateUntilSuccessfulCallbackDestruction() {
         var state: RouterAggregate.CallbackLifetime? = .init(taps: [])
-        weak var observedState = state
+        weak let observedState = state
         var retainedCallback: (() -> Int)? = { [state = state!] in
             state.played += 1
             return state.played

@@ -10,7 +10,7 @@ final class RouterTopologyTests: XCTestCase {
     ], mixes: [])
 
     private func process(_ id: AudioObjectID, _ bundle: String) -> AudioProcessInfo {
-        AudioProcessInfo(objectID: id, pid: pid_t(id), bundleID: bundle, isRunningOutput: true, deviceIDs: [])
+        AudioProcessInfo(objectID: id, pid: pid_t(id), bundleID: bundle, isRunningOutput: true)
     }
 
     func testUnrelatedProcessDoesNotChangeActualDesiredSpecs() {
@@ -114,15 +114,53 @@ final class RouterTopologyTests: XCTestCase {
         XCTAssertTrue(health.sourceStaleSamples.values.allSatisfy { $0 == 0 })
     }
 
-    func testNativeLimiterFailureRequiresRecoveryDespiteAdvancingInputAndOutput() {
+    func testNativeLimiterFailuresRequireTwoConsecutiveGrowingSamples() {
         var snapshot = RouterAggregate.HealthSnapshot(fires: 100, inputBuffers: 1, inputChannels: 2,
             inputFrames: 48_000, outputBuffers: 1, outputChannels: 2, outputFrames: 48_000,
             outputPeak: 0, limiterHits: 0)
-        let state = CoreAudioEngine.RouterHealthState()
+        var state = CoreAudioEngine.RouterHealthState()
         XCTAssertTrue(snapshot.hasAdvancedIO)
         XCTAssertTrue(snapshot.hasExpectedInput)
-        XCTAssertFalse(CoreAudioEngine.aggregateRecoveryRequired(snapshot: snapshot, state: state))
-        snapshot.limiterFailures = 1
-        XCTAssertTrue(CoreAudioEngine.aggregateRecoveryRequired(snapshot: snapshot, state: state))
+        func observe(_ failures: Int) -> Bool {
+            snapshot.limiterFailures = failures
+            state.recordLimiterFailures(failures)
+            return CoreAudioEngine.aggregateRecoveryRequired(snapshot: snapshot, state: state)
+        }
+        XCTAssertFalse(observe(0))
+        XCTAssertFalse(observe(1), "a single transient failure never forces a protected teardown")
+        XCTAssertFalse(observe(1), "a cumulative total that stops growing is not a live failure")
+        XCTAssertFalse(observe(2))
+        XCTAssertTrue(observe(3), "two consecutive growing samples require recovery")
+        var fresh = CoreAudioEngine.RouterHealthState()
+        fresh.recordLimiterFailures(5)
+        XCTAssertEqual(fresh.limiterFailureSamples, 0, "the first sample only establishes the baseline")
+    }
+
+    func testFoldedGainsDriveAudibilityAndMatchTheRouterFold() {
+        let config = BamConfig(master: 0.5, sources: [
+            Source(id: "app", name: "App", kind: .app, bundleIDs: ["example.app"]),
+            Source(id: "rest", name: "Other", kind: .rest),
+        ], mixes: [
+            Mix(id: "m", name: "Mix", dest: .virtualSlot(0), sends: [Send(source: "app", level: 0.8), Send(source: "rest", muted: true)]),
+        ], pans: ["app": 0.25])
+        let gains = CoreAudioEngine.foldedGains(config)
+        XCTAssertEqual(gains["app"]?.left ?? 0, 0.4, accuracy: 1e-6)
+        XCTAssertEqual(gains["app"]?.right ?? 0, 0.2, accuracy: 1e-6)
+        XCTAssertEqual(gains["rest"]?.left, 0)
+        let processes = [process(1, "example.app"), process(2, "other.app")]
+        XCTAssertEqual(CoreAudioEngine.expectedAudibleSourceIDs(config: config, processes: processes, selfBundle: nil), ["app"])
+        var soloed = config
+        soloed.solo = "rest"
+        XCTAssertEqual(CoreAudioEngine.expectedAudibleSourceIDs(config: soloed, processes: processes, selfBundle: nil), [])
+    }
+
+    func testMuteStateIsNilWhenAnyElementIsUnreadable() {
+        XCTAssertEqual(CoreAudioEngine.muteState(main: 1, hasMain: true, channels: []), true)
+        XCTAssertEqual(CoreAudioEngine.muteState(main: 0, hasMain: true, channels: []), false)
+        XCTAssertNil(CoreAudioEngine.muteState(main: nil, hasMain: true, channels: []))
+        XCTAssertNil(CoreAudioEngine.muteState(main: nil, hasMain: false, channels: []))
+        XCTAssertEqual(CoreAudioEngine.muteState(main: nil, hasMain: false, channels: [1, 1]), true)
+        XCTAssertEqual(CoreAudioEngine.muteState(main: nil, hasMain: false, channels: [1, 0]), false)
+        XCTAssertNil(CoreAudioEngine.muteState(main: nil, hasMain: false, channels: [1, nil]))
     }
 }

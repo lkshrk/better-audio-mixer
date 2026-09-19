@@ -1,3 +1,4 @@
+import Accelerate
 import AudioToolbox
 
 /// Single-render-thread owner. Construct, reset, and destroy only while rendering is quiescent.
@@ -15,6 +16,8 @@ final class NativePeakLimiter {
     private(set) var guardedSamples: UInt64 = 0
     private(set) var renderFailures: UInt64 = 0
     private(set) var inputOverCeilingCallbacks: UInt64 = 0
+    /// Detector input is bounded to 1024; larger levels would need detector normalization.
+    private static let inputBound: Float = 1024
 
     init?(sampleRate: Double, maximumFrames: Int) {
         guard sampleRate.isFinite, sampleRate >= 8000, sampleRate <= 384000,
@@ -87,15 +90,25 @@ final class NativePeakLimiter {
         guard frames <= maximumFrames, let unit else {
             silence(left, right, stride, frames); renderFailures &+= 1; return true
         }
-        var limited = false
-        var inputOverCeiling = false
         inputFrames = frames
-        for frame in 0..<frames {
-            let l = left[frame * stride], r = right?[frame * stride] ?? l
-            inputOverCeiling = inputOverCeiling || (l.isFinite && abs(l) > 1) || (r.isFinite && abs(r) > 1)
-            limited = limited || !l.isFinite || !r.isFinite || abs(l) > 1 || abs(r) > 1
-            inputLeft[frame] = sanitize(l); inputRight[frame] = sanitize(r)
+        let n = vDSP_Length(frames)
+        var zero: Float = 0
+        vDSP_vsadd(left, stride, &zero, inputLeft, 1, n)
+        if let right {
+            vDSP_vsadd(right, stride, &zero, inputRight, 1, n)
+        } else {
+            memcpy(inputRight, inputLeft, frames * MemoryLayout<Float>.size)
         }
+        var guarded: UInt64 = 0
+        var peakIn = max(DSPKernels.peakMagnitudeVDSP(inputLeft, count: frames),
+                         DSPKernels.peakMagnitudeVDSP(inputRight, count: frames))
+        if !Self.allFinite(inputLeft, n) || !Self.allFinite(inputRight, n) || peakIn > Self.inputBound {
+            guarded += sanitize(inputLeft, frames) + sanitize(inputRight, frames)
+            peakIn = max(DSPKernels.peakMagnitudeVDSP(inputLeft, count: frames),
+                         DSPKernels.peakMagnitudeVDSP(inputRight, count: frames))
+        }
+        let inputOverCeiling = peakIn > 1
+        var limited = inputOverCeiling || guarded > 0
         if inputOverCeiling, inputOverCeilingCallbacks != .max { inputOverCeilingCallbacks += 1 }
         buffers[0] = AudioBuffer(mNumberChannels: 1, mDataByteSize: UInt32(frames * 4), mData: outputLeft)
         buffers[1] = AudioBuffer(mNumberChannels: 1, mDataByteSize: UInt32(frames * 4), mData: outputRight)
@@ -103,32 +116,54 @@ final class NativePeakLimiter {
         var flags: AudioUnitRenderActionFlags = []
         let status = AudioUnitRender(unit, &flags, &timestamp, 0, UInt32(frames), buffers.unsafeMutablePointer)
         sampleTime += Double(frames)
-        guard status == noErr else { silence(left, right, stride, frames); renderFailures &+= 1; return true }
-        for frame in 0..<frames {
-            let l = outputLeft[frame], r = outputRight[frame]
-            guard l.isFinite && r.isFinite else {
-                silence(left, right, stride, frames); guardedSamples &+= 1; renderFailures &+= 1; return true
+        guard status == noErr else {
+            silence(left, right, stride, frames); guardedSamples &+= guarded; renderFailures &+= 1; return true
+        }
+        guard Self.allFinite(outputLeft, n), Self.allFinite(outputRight, n) else {
+            silence(left, right, stride, frames); guardedSamples &+= guarded &+ 1; renderFailures &+= 1; return true
+        }
+        let peakOut = max(DSPKernels.peakMagnitudeVDSP(outputLeft, count: frames),
+                          DSPKernels.peakMagnitudeVDSP(outputRight, count: frames))
+        if peakOut > 1 {
+            limited = true
+            var frame = 0
+            while frame < frames {
+                if abs(outputLeft[frame]) > 1 || abs(outputRight[frame]) > 1 { guarded &+= 1 }
+                frame += 1
             }
         }
-        for frame in 0..<frames {
-            let l = outputLeft[frame], r = outputRight[frame]
-            if abs(l) > 1 || abs(r) > 1 { limited = true; guardedSamples &+= 1 }
-            left[frame * stride] = min(1, max(-1, l))
-            right?[frame * stride] = min(1, max(-1, r))
-        }
+        var low: Float = -1, high: Float = 1
+        vDSP_vclip(outputLeft, 1, &low, &high, left, vDSP_Stride(stride), n)
+        if let right { vDSP_vclip(outputRight, 1, &low, &high, right, vDSP_Stride(stride), n) }
+        guardedSamples &+= guarded
         return limited
     }
 
-    private func sanitize(_ value: Float) -> Float {
-        guard value.isFinite else { guardedSamples &+= 1; return 0 }
-        // ponytail: bound native detector input to 1024; larger supported levels
-        // would require detector normalization, not unbounded native arithmetic.
-        guard abs(value) <= 1024 else { guardedSamples &+= 1; return min(1024, max(-1024, value)) }
-        return value
+    @inline(__always)
+    private static func allFinite(_ buffer: UnsafePointer<Float>, _ n: vDSP_Length) -> Bool {
+        var sum: Float = 0
+        vDSP_sve(buffer, 1, &sum, n)
+        return sum.isFinite
+    }
+
+    private func sanitize(_ buffer: UnsafeMutablePointer<Float>, _ frames: Int) -> UInt64 {
+        var guarded: UInt64 = 0
+        var frame = 0
+        while frame < frames {
+            let value = buffer[frame]
+            if !value.isFinite {
+                buffer[frame] = 0; guarded &+= 1
+            } else if abs(value) > Self.inputBound {
+                buffer[frame] = min(Self.inputBound, max(-Self.inputBound, value)); guarded &+= 1
+            }
+            frame += 1
+        }
+        return guarded
     }
 
     private func silence(_ left: UnsafeMutablePointer<Float>, _ right: UnsafeMutablePointer<Float>?, _ stride: Int, _ frames: Int) {
-        for frame in 0..<frames { left[frame * stride] = 0; right?[frame * stride] = 0 }
+        DSPKernels.clearVDSP(left, stride: stride, frames: frames)
+        if let right { DSPKernels.clearVDSP(right, stride: stride, frames: frames) }
     }
 
     @discardableResult

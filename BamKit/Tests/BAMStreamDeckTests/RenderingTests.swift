@@ -5,21 +5,22 @@ import Testing
 @MainActor
 struct LevelMappingTests {
 
-    @Test func levelPercentClampsAtFloorAndCeiling() {
-        #expect(ActionRouter.levelPercent(-60) == 0)   // floor
-        #expect(ActionRouter.levelPercent(-90) == 0)   // below floor
-        #expect(ActionRouter.levelPercent(0) == 100)   // full scale
-        #expect(ActionRouter.levelPercent(5) == 100)   // above full scale clamps
-    }
-
-    @Test func levelPercentMapsMidpoint() {
-        #expect(ActionRouter.levelPercent(-30) == 50)  // halfway across the -60…0 range
-    }
-
-    @Test func levelFractionMatchesPercent() {
+    @Test func levelFractionClampsAtFloorAndCeiling() {
         #expect(ActionRouter.levelFraction(-60) == 0)
+        #expect(ActionRouter.levelFraction(-90) == 0)
         #expect(ActionRouter.levelFraction(0) == 1)
+        #expect(ActionRouter.levelFraction(5) == 1)
         #expect(abs(ActionRouter.levelFraction(-30) - 0.5) < 0.0001)
+    }
+
+    @Test func quantizeIsSharedByEveryScale() {
+        #expect(MeterScale.quantize(0.62, steps: MeterScale.lcdNeedleSteps, muted: false) == 56)
+        #expect(MeterScale.quantize(0.754, steps: MeterScale.lcdBarSteps, muted: false) == 75)
+        #expect(MeterScale.quantize(1.5, steps: 90, muted: false) == 90)
+        #expect(MeterScale.quantize(0.8, steps: 90, muted: true) == 0)
+        #expect(MeterScale.segmentCount(for: .channel) == 12)
+        #expect(MeterScale.segmentCount(for: .meter) == 18)
+        #expect(MeterScale.segmentCount(for: .retro) == MeterScale.keyNeedleSteps)
     }
 }
 
@@ -46,236 +47,208 @@ struct WrapPosTests {
 }
 
 @MainActor
-struct AccentTests {
+struct GlyphMappingTests {
+
+    @Test func everyMappedEmojiResolvesToAnInstalledSymbol() {
+        for (emoji, name) in GlyphDrawing.emojiSymbols {
+            #expect(GlyphDrawing.symbolName(forEmoji: emoji) == name)
+            #expect(NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil, "\(emoji) -> \(name)")
+        }
+    }
+
+    @Test func lookupIgnoresVariationSelectorsAndSkinTones() {
+        #expect(GlyphDrawing.symbolName(forEmoji: "☎\u{FE0F}") == "phone.fill")
+        #expect(GlyphDrawing.symbolName(forEmoji: "🎙\u{FE0F}") == "mic.fill")
+        #expect(GlyphDrawing.symbolName(forEmoji: "🗣\u{1F3FD}") == "person.wave.2.fill")
+        #expect(GlyphDrawing.symbolName(forEmoji: "🍕") == nil)
+    }
+
+    @Test func monoHeaderDrawsMappedEmojiExactlyLikeTheSymbol() {
+        let spec = KeyHeader.Spec.key
+        let emoji = KeyHeader.render(KeyHeader.Input(glyph: .emoji("🌐"), monogram: "B", accent: Palette.accents[0], name: "Browser", spec: spec))
+        let symbol = KeyHeader.render(KeyHeader.Input(glyph: .symbol("globe"), monogram: "B", accent: Palette.accents[0], name: "Browser", spec: spec))
+        #expect(emoji != nil)
+        #expect(emoji == symbol)
+        #expect(KeyHeader.render(KeyHeader.Input(glyph: .emoji("🍕"), monogram: "P", accent: Palette.accents[0], name: "Pizza", spec: spec)) != nil)
+    }
+}
+
+struct PaletteTests {
 
     @Test func accentIsDeterministic() {
-        #expect(ActionRouter.accent(forID: "mix-default") == ActionRouter.accent(forID: "mix-default"))
+        #expect(Palette.accent(forID: "mix-default") == Palette.accent(forID: "mix-default"))
     }
 
     @Test func accentIsAlwaysAPaletteColor() {
         for id in ["mix-default", "kasper", "game", "alpha", "zzz", ""] {
-            #expect(ActionRouter.accentPalette.contains(ActionRouter.accent(forID: id)))
+            #expect(Palette.accents.contains(Palette.accent(forID: id)))
         }
+    }
+
+    @Test func hexRoundsChannels() {
+        #expect(Palette.mutedRed.hex == "#FF4D4D")
+        #expect(RGB(0, 0, 0).hex == "#000000")
+    }
+
+    @Test func gradientStopsFollowSegmentBands() {
+        let stops = Palette.segmentGradientStops
+        #expect(stops.map(\.offset) == [0, 0.6, 0.6, 0.85, 0.85, 1])
+        #expect(stops.map(\.color) == [Palette.segmentGreen, Palette.segmentGreen, Palette.segmentAmber,
+                                       Palette.segmentAmber, Palette.mutedRed, Palette.mutedRed])
+        #expect(Palette.segment(0) == Palette.segmentGreen)
+        #expect(Palette.segment(0.7) == Palette.segmentAmber)
+        #expect(Palette.segment(0.95) == Palette.mutedRed)
     }
 }
 
 @MainActor
 struct KeyStyleImageTests {
+    private let blue = Palette.accents[0]
 
-    @Test(arguments: [KeyStyleImage.KeyStyle.channel, .meter, .retro])
-    func rendersPNGForEveryStyle(style: KeyStyleImage.KeyStyle) {
-        let uri = KeyStyleImage.render(style: style, monogram: "GA", accent: .systemBlue,
-                                       name: "Game", pct: 73, level: 0.6, muted: false)
-        #expect(uri?.hasPrefix("data:image/png;base64,") == true)
+    private func input(_ style: KeyStyleImage.KeyStyle, glyph: KeyImage.Glyph? = .symbol("speaker.wave.2.fill"),
+                       monogram: String = "GA", name: String = "Game", pct: Int = 73,
+                       level: Float = 0.6, muted: Bool = false) -> KeyStyleImage.Input {
+        KeyStyleImage.Input(style: style, glyph: glyph, monogram: monogram, accent: blue, name: name,
+                            pct: pct, level: level, leftLevel: 0.4, rightLevel: 0.8, muted: muted)
     }
 
-    @Test(arguments: [KeyStyleImage.KeyStyle.channel, .meter])
-    func optimizedSegmentedButtonStylesRenderSVG(style: KeyStyleImage.KeyStyle) {
-        let uri = KeyStyleImage.renderOptimized(style: style, glyph: .symbol("speaker.wave.2.fill"),
-                                                monogram: "GA", accent: .systemBlue,
-                                                name: "Game", pct: 73, level: 0.6,
-                                                leftLevel: 0.4, rightLevel: 0.8,
-                                                muted: false)
-        #expect(uri?.hasPrefix("data:image/svg+xml;base64,") == true)
+    @Test(arguments: [KeyStyleImage.KeyStyle.channel, .meter, .retro])
+    func everyStyleRendersPercentEncodedSVGWithRasterHeader(style: KeyStyleImage.KeyStyle) {
+        let uri = KeyStyleImage.render(input(style))
+        #expect(uri?.hasPrefix("data:image/svg+xml;charset=utf8,") == true)
+        #expect(uri?.contains("#") == false)
         let svg = svgText(fromDataURI: uri)
         #expect(svg?.contains("<svg width=\"144\" height=\"144\"") == true)
-        #expect(svg?.contains("Game") == true)
-        if style == .channel {
-            #expect(svg?.contains("x=\"14.00\" y=\"44.00\" width=\"112.00\" height=\"50.00\"") == true)
-        }
+        #expect(svg?.contains("data:image/png;base64,") == true)
+        #expect(svg?.contains(Palette.tile.hex) == true)
     }
 
-    @Test func optimizedSegmentedEmojiIconsStayTinted() {
-        let uri = KeyStyleImage.renderOptimized(style: .channel, glyph: .emoji("🌐"),
-                                                monogram: "BR", accent: .systemBlue,
-                                                name: "Browser", pct: 60, level: 0.5,
-                                                muted: false)
-        let svg = svgText(fromDataURI: uri)
-        #expect(uri?.hasPrefix("data:image/svg+xml;base64,") == true)
+    @Test func emojiHeaderIsRasterizedNotInlineText() {
+        let svg = svgText(fromDataURI: KeyStyleImage.render(input(.channel, glyph: .emoji("🌐"), name: "Browser")))
         #expect(svg?.contains("data:image/png;base64,") == true)
         #expect(svg?.contains("🌐") == false)
+        #expect(svg?.contains("Browser") == false)
     }
 
-    @Test func optimizedChannelVolumeNumberUsesRetroPosition() {
-        let uri = KeyStyleImage.renderOptimized(style: .channel, glyph: .symbol("speaker.wave.2.fill"),
-                                                monogram: "VO", accent: .systemCyan,
-                                                name: "Voice", pct: 75, level: 0.5,
-                                                muted: false)
-        let svg = svgText(fromDataURI: uri)
-        #expect(svg?.contains("<image href=\"data:image/png;base64,") == true)
-        #expect(svg?.contains("x=\"14.00\" y=\"44.00\" width=\"112.00\" height=\"50.00\"") == true)
+    @Test func channelValueIsCachedRasterAtItsRect() {
+        let svg = svgText(fromDataURI: KeyStyleImage.render(input(.channel, pct: 75)))
+        let r = KeyStyleImage.volumeValueRect
+        let expected = "x=\"\(KeyStyleImage.f(r.minX))\" y=\"\(KeyStyleImage.f(r.minY))\" width=\"\(KeyStyleImage.f(r.width))\" height=\"\(KeyStyleImage.f(r.height))\""
+        #expect(svg?.contains(expected) == true)
     }
 
-    @Test func optimizedSegmentedSymbolsRenderAtRuntime() {
-        let uri = KeyStyleImage.renderOptimized(style: .meter, glyph: .symbol("bolt.fill"),
-                                                monogram: "BO", accent: .systemYellow,
-                                                name: "Bolt", pct: 60, level: 0.5,
-                                                muted: false)
-        let svg = svgText(fromDataURI: uri)
-        #expect(uri?.hasPrefix("data:image/svg+xml;base64,") == true)
-        #expect(svg?.contains("data:image/png;base64,") == true)
-        #expect(svg?.contains(">BO<") == false)
+    @Test func rendersAreStableAcrossCalls() {
+        #expect(KeyStyleImage.render(input(.channel, glyph: .symbol("bolt.fill"))) ==
+                KeyStyleImage.render(input(.channel, glyph: .symbol("bolt.fill"))))
     }
 
-    @Test func optimizedSegmentedRuntimeIconsAreStableAcrossRenders() {
-        let first = KeyStyleImage.renderOptimized(style: .channel, glyph: .symbol("bolt.fill"),
-                                                  monogram: "BO", accent: .systemYellow,
-                                                  name: "Bolt", pct: 61, level: 0.5,
-                                                  muted: false)
-        let second = KeyStyleImage.renderOptimized(style: .channel, glyph: .symbol("bolt.fill"),
-                                                   monogram: "BO", accent: .systemYellow,
-                                                   name: "Bolt", pct: 61, level: 0.5,
-                                                   muted: false)
-        #expect(first == second)
-    }
-
-    @Test func optimizedSegmentedInvalidSymbolFallsBackToMonogram() {
-        let uri = KeyStyleImage.renderOptimized(style: .meter, glyph: .symbol("not.a.real.symbol"),
-                                                monogram: "NA", accent: .systemYellow,
-                                                name: "Bad", pct: 60, level: 0.5,
-                                                muted: false)
-        let svg = svgText(fromDataURI: uri)
-        #expect(uri?.hasPrefix("data:image/svg+xml;base64,") == true)
-        #expect(svg?.contains("data:image/png;base64,") == false)
-        #expect(svg?.contains(">NA<") == true)
-    }
-
-    @Test func optimizedRetroButtonStyleKeepsPNG() {
-        let uri = KeyStyleImage.renderOptimized(style: .retro, glyph: .symbol("speaker.wave.2.fill"),
-                                                monogram: "GA", accent: .systemBlue,
-                                                name: "Game", pct: 73, level: 0.6,
-                                                muted: false)
-        #expect(uri?.hasPrefix("data:image/png;base64,") == true)
-    }
-
-    @Test(arguments: [KeyStyleImage.KeyStyle.channel, .meter, .retro])
-    func styledButtonImagesLeaveStreamDeckChromeMargin(style: KeyStyleImage.KeyStyle) {
-        let uri = KeyStyleImage.render(style: style, glyph: .emoji("🌐"), monogram: "BR",
-                                       accent: .systemBlue, name: "Browser",
-                                       pct: 60, level: 0.62, muted: false)
-        guard let rep = bitmap(fromDataURI: uri) else {
-            #expect(Bool(false), "Styled key render should decode as PNG")
+    @Test func invalidSymbolFallsBackToAccentMonogramInHeader() {
+        let header = KeyHeader.render(KeyHeader.Input(glyph: .symbol("not.a.real.symbol"), monogram: "NA",
+                                                      accent: blue, name: "Bad", spec: .key))
+        guard let rep = bitmap(fromDataURI: header) else {
+            Issue.record("header should decode as PNG")
             return
         }
+        #expect(countPixels(rep, near: blue) > 20)
+    }
 
-        #expect(rep.pixelsWide == 144)
-        #expect(rep.pixelsHigh == 144)
-        for point in [(0, 0), (4, 4), (139, 139), (143, 143)] {
-            let alpha = rep.colorAt(x: point.0, y: point.1)?.alphaComponent ?? 0
-            #expect(alpha < 0.1)
+    @Test func retroEmbedsCachedGaugeBandWithLiveNeedle() {
+        let low = svgText(fromDataURI: KeyStyleImage.render(input(.retro, level: 0.2)))
+        let high = svgText(fromDataURI: KeyStyleImage.render(input(.retro, level: 0.9)))
+        #expect(low?.contains("<line") == true)
+        #expect(low?.contains("<circle") == true)
+        #expect(low != high)
+        let band = KeyStyleImage.cachedGaugeBand(pct: 73, accent: blue, muted: false)
+        #expect(band != nil)
+        #expect(low?.contains(band ?? "-") == true)
+        #expect(high?.contains(band ?? "-") == true)
+        let r = KeyStyleImage.retroGaugeBand
+        #expect(low?.contains("y=\"\(KeyStyleImage.f(r.minY))\" width=\"\(KeyStyleImage.f(r.width))\"") == true)
+    }
+
+    @Test func gaugeBandIsRasterizedAtBandSize() {
+        guard let rep = bitmap(fromDataURI: KeyStyleImage.cachedGaugeBand(pct: 50, accent: blue, muted: false)) else {
+            Issue.record("gauge band should decode as PNG")
+            return
         }
+        #expect(rep.pixelsWide == Int(KeyStyleImage.retroGaugeBand.width))
+        #expect(rep.pixelsHigh == Int(KeyStyleImage.retroGaugeBand.height))
+        #expect(countPixels(rep, near: blue) > 4)
+        #expect(countPixels(rep, near: Palette.mutedRed) > 4)
     }
 
     @Test(arguments: [KeyStyleImage.KeyStyle.channel, .meter, .retro])
-    func rendersMutedVariant(style: KeyStyleImage.KeyStyle) {
-        let uri = KeyStyleImage.render(style: style, monogram: "M", accent: .systemPurple,
-                                       name: "Master", pct: 40, level: 0, muted: true)
-        #expect(uri?.hasPrefix("data:image/png;base64,") == true)
+    func mutedKeysGetRedBorderAndNoStrike(style: KeyStyleImage.KeyStyle) {
+        let svg = svgText(fromDataURI: KeyStyleImage.render(input(style, muted: true)))
+        #expect(svg?.contains("stroke=\"\(Palette.mutedRed.hex)\" stroke-width=\"\(KeyStyleImage.f(Palette.mutedBorderWidth))\"") == true)
+        #expect(svg?.contains("<line x1=\"18") == false)
+        if style != .meter {
+            #expect(svg?.contains("opacity=\"\(KeyStyleImage.f(Palette.mutedValueOpacity))\"") == true)
+        }
     }
 
     @Test func rendersAtRailValues() {
         for pct in [0, 100] {
             for level in [Float(0), 1] {
-                let uri = KeyStyleImage.render(style: .meter, monogram: "DE", accent: .systemRed,
-                                               name: "Default", pct: pct, level: level, muted: false)
-                #expect(uri != nil)
+                #expect(KeyStyleImage.render(input(.meter, pct: pct, level: level)) != nil)
             }
         }
     }
 
-    @Test func rendersRetroLCDCanvas() {
-        let uri = RetroMeterDrawing.renderLCD(name: "Game", monogram: "GA", accent: .systemBlue,
-                                              pct: 73, level: 0.6, muted: false)
-        #expect(uri?.hasPrefix("data:image/png;base64,") == true)
-    }
-
-    @Test func retroLCDCanvasContainsDialDetail() {
-        let uri = RetroMeterDrawing.renderLCD(name: "Stream", monogram: "ST", accent: .systemOrange,
-                                              pct: 100, level: 0.62, muted: false)
+    @Test func retroLCDCanvasContainsGaugeAndRedZone() {
+        let uri = RetroMeterDrawing.renderLCDStatic(RetroMeterDrawing.LCDInput(
+            style: .retro, glyph: .symbol("speaker.wave.2.fill"), monogram: "ST",
+            accent: Palette.accents[2], name: "Stream", pct: 100, muted: false))
         guard let rep = bitmap(fromDataURI: uri) else {
-            #expect(Bool(false), "Retro LCD render should decode as PNG")
+            Issue.record("Retro LCD render should decode as PNG")
             return
         }
-
         #expect(rep.pixelsWide == 200)
         #expect(rep.pixelsHigh == 100)
 
-        var dialPixels = 0
-        var redZonePixels = 0
+        var gaugePixels = 0
         for x in 20..<180 {
             for y in 40..<96 {
                 guard let color = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
-                let isBackground = color.redComponent < 0.08
-                    && color.greenComponent < 0.08
-                    && color.blueComponent < 0.08
-                if !isBackground { dialPixels += 1 }
-                if color.redComponent > 0.65
-                    && color.greenComponent < 0.35
-                    && color.blueComponent < 0.35 {
-                    redZonePixels += 1
-                }
+                if color.redComponent > 0.1 || color.greenComponent > 0.1 || color.blueComponent > 0.1 { gaugePixels += 1 }
             }
         }
-
-        #expect(dialPixels > 900)
-        #expect(redZonePixels > 3)
+        #expect(gaugePixels > 250)
+        #expect(countPixels(rep, near: Palette.mutedRed) > 3)
     }
 
-    @Test func retroLCDSplitLayersRenderExpectedSizes() {
-        let staticURI = RetroMeterDrawing.renderRetroLCDStatic(name: "Stream", monogram: "ST",
-                                                               accent: .systemOrange,
-                                                               pct: 82, muted: false)
-        let needleStep = RetroMeterDrawing.retroLCDLevelNeedleStep(level: 0.62, muted: false)
-        let needleURI = RetroMeterDrawing.renderRetroLCDLevelNeedleSVG(step: needleStep, muted: false)
-
-        guard let staticRep = bitmap(fromDataURI: staticURI) else {
-            #expect(Bool(false), "Retro LCD layers should decode as PNG")
-            return
-        }
-
-        #expect(staticRep.pixelsWide == 200)
-        #expect(staticRep.pixelsHigh == 100)
-        #expect(needleURI.hasPrefix("data:image/svg+xml;base64,"))
-        #expect(needleStep == 56)
+    @Test func retroLCDNeedleLayerOmitsPeakAtZero() {
+        let withPeak = svgText(fromDataURI: RetroMeterDrawing.renderRetroLCDNeedleSVG(step: 56, peakStep: 70, muted: false))
+        let noPeak = svgText(fromDataURI: RetroMeterDrawing.renderRetroLCDNeedleSVG(step: 56, peakStep: 0, muted: false))
+        #expect(withPeak?.components(separatedBy: "<line").count == 3)
+        #expect(noPeak?.components(separatedBy: "<line").count == 2)
+        #expect(noPeak?.contains("stroke=\"\(Palette.needle.hex)\"") == true)
+        let layer = RetroMeterDrawing.lcdNeedleLayer
+        #expect(noPeak?.contains("<svg width=\"\(Int(layer.width))\" height=\"\(Int(layer.height))\"") == true)
     }
 
-    @Test func retroLCDLevelNeedleQuantizesSmallMotion() {
-        let a = RetroMeterDrawing.retroLCDLevelNeedleStep(level: 0.620, muted: false)
-        let b = RetroMeterDrawing.retroLCDLevelNeedleStep(level: 0.624, muted: false)
-        let c = RetroMeterDrawing.retroLCDLevelNeedleStep(level: 0.640, muted: false)
-
-        #expect(a == b)
-        #expect(c > a)
-        #expect(RetroMeterDrawing.retroLCDLevelNeedleStep(level: 1.5, muted: false) == 90)
-        #expect(RetroMeterDrawing.retroLCDLevelNeedleStep(level: 0.8, muted: true) == 0)
-    }
-
-    @Test func liveLCDBarLayersUseStaticCanvasAndSVGOverlay() {
-        let staticURI = RetroMeterDrawing.renderLCDStatic(style: .channel, name: "Voice",
-                                                          monogram: "VO", accent: .systemCyan,
-                                                          pct: 75, muted: false)
-        let step = RetroMeterDrawing.lcdLevelBarStep(level: 0.754, muted: false)
-        let barURI = RetroMeterDrawing.renderLCDLevelBarSVG(width: 128, height: 17,
-                                                            step: step, peakStep: 92, muted: false)
-        let cachedBarURI = RetroMeterDrawing.renderLCDLevelBarSVG(width: 128, height: 17,
-                                                                  step: step, peakStep: 92, muted: false)
-
-        guard let staticRep = bitmap(fromDataURI: staticURI) else {
-            #expect(Bool(false), "Channel static LCD layer should decode as PNG")
-            return
-        }
-
-        #expect(staticRep.pixelsWide == 200)
-        #expect(staticRep.pixelsHigh == 100)
-        #expect(step == 75)
-        #expect(cachedBarURI == barURI)
-        #expect(barURI.hasPrefix("data:image/svg+xml;base64,"))
-        let svg = svgText(fromDataURI: barURI)
+    @Test func liveLCDBarLayersUsePaletteAndCache() {
+        let uri = RetroMeterDrawing.renderLCDLevelBarSVG(width: 184, height: 16, step: 75, peakStep: 92, muted: false)
+        #expect(RetroMeterDrawing.renderLCDLevelBarSVG(width: 184, height: 16, step: 75, peakStep: 92, muted: false) == uri)
+        #expect(uri.hasPrefix("data:image/svg+xml;charset=utf8,"))
+        let svg = svgText(fromDataURI: uri)
         #expect(svg?.contains("linearGradient") == true)
-        #expect(svg?.contains("#292929") == true)
-        #expect(svg?.contains("#FF3636") == true)
-        #expect(svg?.contains("#050505") == true)
+        #expect(svg?.contains(Palette.rail.hex) == true)
+        #expect(svg?.contains(Palette.text.hex) == true)
+        #expect(svg?.contains(Palette.segmentGreen.hex) == true)
         #expect(svg?.contains("clipPath") == false)
+        let silent = svgText(fromDataURI: RetroMeterDrawing.renderLCDLevelBarSVG(width: 184, height: 16, step: 0, peakStep: 0, muted: false))
+        #expect(silent?.contains(Palette.text.hex) == false)
+    }
+
+    @Test func keyImageRendersGlyphWithOptionalSlash() {
+        let plain = KeyImage.render(.symbol("hifispeaker.fill"), muted: false)
+        let muted = KeyImage.render(.symbol("hifispeaker.fill"), muted: true)
+        #expect(plain?.hasPrefix("data:image/png;base64,") == true)
+        #expect(muted != plain)
+        #expect(KeyImage.render(.emoji("  "), muted: false) == nil)
+        #expect(KeyImage.render(.symbol("not.a.real.symbol"), muted: false) == nil)
+        if let rep = bitmap(fromDataURI: muted) { #expect(countPixels(rep, near: Palette.mutedRed) > 100) }
     }
 
     @Test func visualStyleNormalizerKeepsCurrentAndLegacyValuesWorking() {
@@ -288,31 +261,50 @@ struct KeyStyleImageTests {
         #expect(ActionRouter.normalizedVisualStyle(nil) == .channel)
     }
 
-    @Test func keyLevelSignatureQuantizesOnlySegmentedKeyStyles() {
+    @Test func keyLevelSignatureQuantizesEveryKeyStyle() {
         #expect(ActionRouter.keyLevelSignature(style: .channel, level: 0.499, muted: false) ==
                 ActionRouter.keyLevelSignature(style: .channel, level: 0.501, muted: false))
         #expect(ActionRouter.keyLevelSignature(style: .meter, level: 0.499, muted: false) ==
                 ActionRouter.keyLevelSignature(style: .meter, level: 0.501, muted: false))
+        #expect(ActionRouter.keyLevelSignature(style: .retro, level: 0.499, muted: false) ==
+                ActionRouter.keyLevelSignature(style: .retro, level: 0.51, muted: false))
         #expect(ActionRouter.keyLevelSignature(style: .retro, level: 0, muted: false) == 0)
-        #expect(ActionRouter.keyLevelSignature(style: .retro, level: 1, muted: false) == 100)
+        #expect(ActionRouter.keyLevelSignature(style: .retro, level: 1, muted: false) == 24)
 
         #expect(ActionRouter.keyLevelSignature(style: .channel, level: 0.499, muted: false) !=
                 ActionRouter.keyLevelSignature(style: .channel, level: 0.61, muted: false))
         #expect(ActionRouter.keyLevelSignature(style: .meter, level: 0.499, muted: false) !=
                 ActionRouter.keyLevelSignature(style: .meter, level: 0.57, muted: false))
         #expect(ActionRouter.keyLevelSignature(style: .retro, level: 0.499, muted: false) !=
-                ActionRouter.keyLevelSignature(style: .retro, level: 0.52, muted: false))
+                ActionRouter.keyLevelSignature(style: .retro, level: 0.56, muted: false))
         #expect(ActionRouter.keyLevelSignature(style: .meter, level: 1, muted: true) == 0)
     }
 
     @Test func peakWindowTracksMaximumOnlyAcrossRecentSamples() {
         var window = ActionRouter.RollingPeakWindow(seconds: 5, floor: -60)
 
+        #expect(window.peak == ActionRouter.StereoPeak(left: -60, right: -60))
         #expect(window.append(left: -30, right: -28, at: 0) == ActionRouter.StereoPeak(left: -30, right: -28))
         #expect(window.append(left: -12, right: -40, at: 1) == ActionRouter.StereoPeak(left: -12, right: -28))
         #expect(window.append(left: -35, right: -10, at: 5.9) == ActionRouter.StereoPeak(left: -12, right: -10))
         #expect(window.append(left: -45, right: -42, at: 6.1) == ActionRouter.StereoPeak(left: -35, right: -10))
         #expect(window.append(left: -50, right: -45, at: 11.2) == ActionRouter.StereoPeak(left: -50, right: -45))
+        #expect(window.peak == ActionRouter.StereoPeak(left: -50, right: -45))
+    }
+
+    private func countPixels(_ rep: NSBitmapImageRep, near color: RGB, tolerance: CGFloat = 0.12) -> Int {
+        guard let target = color.nsColor.usingColorSpace(.deviceRGB) else { return 0 }
+        let color = RGB(target.redComponent, target.greenComponent, target.blueComponent)
+        var count = 0
+        for x in 0..<rep.pixelsWide {
+            for y in 0..<rep.pixelsHigh {
+                guard let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB), c.alphaComponent > 0.5 else { continue }
+                if abs(c.redComponent - color.red) < tolerance,
+                   abs(c.greenComponent - color.green) < tolerance,
+                   abs(c.blueComponent - color.blue) < tolerance { count += 1 }
+            }
+        }
+        return count
     }
 
     private func bitmap(fromDataURI uri: String?) -> NSBitmapImageRep? {
@@ -324,8 +316,6 @@ struct KeyStyleImageTests {
 
     private func svgText(fromDataURI uri: String?) -> String? {
         guard let uri, let comma = uri.firstIndex(of: ",") else { return nil }
-        let payload = String(uri[uri.index(after: comma)...])
-        guard let data = Data(base64Encoded: payload) else { return nil }
-        return String(data: data, encoding: .utf8)
+        return String(uri[uri.index(after: comma)...]).removingPercentEncoding
     }
 }

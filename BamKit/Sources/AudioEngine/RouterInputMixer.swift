@@ -4,7 +4,7 @@ import Foundation
 /// The production input-mixing path, usable without opening a tap or device.
 /// Prepared off-thread; only the IOProc mutates ramps and meter scratch.
 final class RouterInputMixer {
-    let gains: [AtomicStereoGain]
+    let cells: RouterAtomicCells
     let count: Int
     let channelCount: Int
     private let channelTap: UnsafeMutablePointer<Int>
@@ -17,12 +17,14 @@ final class RouterInputMixer {
     let frames: UnsafeMutablePointer<Int>
     let framesL: UnsafeMutablePointer<Int>
     let framesR: UnsafeMutablePointer<Int>
+    /// Set by `mix` when an input buffer supplied a different frame count than the output.
+    private(set) var frameCountDiverged = false
 
-    init?(channels: [Int], gains: [AtomicStereoGain], sampleRate: Double) {
-        guard !channels.isEmpty, channels.count == gains.count,
+    init?(channels: [Int], cells: RouterAtomicCells, sampleRate: Double) {
+        guard !channels.isEmpty, channels.count == cells.count,
               channels.allSatisfy({ $0 == 1 || $0 == 2 }),
               sampleRate.isFinite, sampleRate > 0 else { return nil }
-        self.gains = gains
+        self.cells = cells
         count = channels.count
         channelCount = channels.reduce(0, +)
         channelTap = .allocate(capacity: channelCount)
@@ -56,19 +58,22 @@ final class RouterInputMixer {
         frames.deallocate(); framesL.deallocate(); framesR.deallocate()
     }
 
-    /// Adds to already-zeroed output. Null input retains its channel positions.
+    /// Fully overwrites `outputFrames` of each lane; lanes without a contributor are cleared.
     @discardableResult
     func mix(_ input: UnsafePointer<AudioBufferList>, left: UnsafeMutablePointer<Float>,
              right: UnsafeMutablePointer<Float>?, outputStride: Int, outputFrames: Int) -> Int {
         var tap = 0
         while tap < count {
-            let target = gains[tap].load()
+            let target = cells.gain(tap).load(ordering: .relaxed)
             leftRamp[tap].setTarget(Float(bitPattern: UInt32(truncatingIfNeeded: target)))
             rightRamp[tap].setTarget(Float(bitPattern: UInt32(truncatingIfNeeded: target >> 32)))
             sumSq[tap] = 0; sumSqL[tap] = 0; sumSqR[tap] = 0
             frames[tap] = 0; framesL[tap] = 0; framesR[tap] = 0
             tap += 1
         }
+        var leftWritten = false
+        var rightWritten = false
+        var diverged = false
         let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
         var channel = 0
         var bufferIndex = 0
@@ -81,6 +86,7 @@ final class RouterInputMixer {
             guard channels > 0, let data = buffer.mData else { continue }
             let samples = data.assumingMemoryBound(to: Float.self)
             let available = Int(buffer.mDataByteSize) / (MemoryLayout<Float>.size * channels)
+            if available != outputFrames { diverged = true }
             let n = min(available, outputFrames)
             guard n > 0 else { continue }
             var local = 0
@@ -91,19 +97,39 @@ final class RouterInputMixer {
                 let ss = DSPKernels.sumOfSquaresVDSP(src: source, stride: channels, frames: n)
                 let scale: Float = right == nil ? 0.5 : 1
                 if side != 1 {
-                    DSPKernels.sumRamped(src: source, stride: channels, ramp: &leftRamp[t], scale: scale,
-                                         dst: left, dstStride: outputStride, frames: n)
+                    DSPKernels.mixRamped(src: source, stride: channels, ramp: &leftRamp[t], scale: scale,
+                                         dst: left, dstStride: outputStride, frames: n, accumulate: leftWritten)
+                    if !leftWritten, n < outputFrames {
+                        DSPKernels.clearVDSP(left + n * outputStride, stride: outputStride, frames: outputFrames - n)
+                    }
+                    leftWritten = true
                     sumSqL[t] += ss; framesL[t] += n
                 }
                 if side != 0 {
-                    DSPKernels.sumRamped(src: source, stride: channels, ramp: &rightRamp[t], scale: scale,
-                                         dst: right ?? left, dstStride: outputStride, frames: n)
+                    if let right {
+                        DSPKernels.mixRamped(src: source, stride: channels, ramp: &rightRamp[t], scale: scale,
+                                             dst: right, dstStride: outputStride, frames: n, accumulate: rightWritten)
+                        if !rightWritten, n < outputFrames {
+                            DSPKernels.clearVDSP(right + n * outputStride, stride: outputStride, frames: outputFrames - n)
+                        }
+                        rightWritten = true
+                    } else {
+                        DSPKernels.mixRamped(src: source, stride: channels, ramp: &rightRamp[t], scale: scale,
+                                             dst: left, dstStride: outputStride, frames: n, accumulate: leftWritten)
+                        if !leftWritten, n < outputFrames {
+                            DSPKernels.clearVDSP(left + n * outputStride, stride: outputStride, frames: outputFrames - n)
+                        }
+                        leftWritten = true
+                    }
                     sumSqR[t] += ss; framesR[t] += n
                 }
                 sumSq[t] += ss; frames[t] += n
                 local += 1
             }
         }
+        if !leftWritten { DSPKernels.clearVDSP(left, stride: outputStride, frames: outputFrames) }
+        if let right, !rightWritten { DSPKernels.clearVDSP(right, stride: outputStride, frames: outputFrames) }
+        frameCountDiverged = diverged
         tap = 0
         while tap < count {
             // Silent/truncated buffers still consume time in a control ramp.

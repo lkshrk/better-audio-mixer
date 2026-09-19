@@ -2,6 +2,11 @@ import XCTest
 @testable import bam
 import BamCore
 
+@MainActor
+private final class HeartbeatGate {
+    var released = false
+}
+
 /// Cause-aware recovery: drives `ConsoleViewModel` through the `MockAudioEngine`
 /// scripting hooks so the recovery logic is exercised without real CoreAudio.
 @MainActor
@@ -173,11 +178,11 @@ final class RouterRecoveryTests: XCTestCase {
             .ok,
         ])
         let model = ConsoleViewModel(engine: mock, defaults: defaults)
-        var releaseHeartbeat = false
+        let heartbeat = HeartbeatGate()
         var delays: [Duration] = []
         model.recoverySleep = { delay in
             delays.append(delay)
-            while !releaseHeartbeat {
+            while !heartbeat.released {
                 try await Task.sleep(for: .milliseconds(10))
             }
         }
@@ -198,7 +203,7 @@ final class RouterRecoveryTests: XCTestCase {
         XCTAssertEqual(model.routerStatus.cause, .buildFailed)
         XCTAssertEqual(delays, [.seconds(2)])
 
-        releaseHeartbeat = true
+        heartbeat.released = true
         let healed = await eventually { model.failedMixIDs.isEmpty }
         XCTAssertTrue(healed, "buildFailed heartbeat should retry and recover")
         XCTAssertEqual(model.routerStatus.cause, .ok)

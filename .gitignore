@@ -68,13 +68,6 @@ ehthumbs_vista.db
 # Dump file
 *.stackdump
 
-# BAMDriver compiled probe binaries (built from sibling .swift sources)
-BAMDriver/dyncheck
-BAMDriver/loopcheck
-BAMDriver/loopcheck2
-BAMDriver/claimcheck
-BAMDriver/mixcfgcheck
-
 # Folder config file
 [Dd]esktop.ini
 

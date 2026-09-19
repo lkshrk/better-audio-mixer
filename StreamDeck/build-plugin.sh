@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Build BAMStreamDeck and drop it into the .sdPlugin bundle's bin/ for local
-# sideload testing. Phase 5 / streamdeck.yml produces the signed universal build.
+# Build BAMStreamDeck into the .sdPlugin bundle's bin/ for local sideloading;
+# CI (streamdeck.yml) produces the signed universal build.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

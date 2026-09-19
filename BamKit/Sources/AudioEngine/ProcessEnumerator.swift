@@ -5,8 +5,7 @@ struct AudioProcessInfo: Sendable, Equatable {
     let objectID: AudioObjectID
     let pid: pid_t
     let bundleID: String
-    let isRunningOutput: Bool
-    let deviceIDs: [AudioObjectID]
+    var isRunningOutput: Bool
 }
 
 struct OutputDeviceInfo: Sendable, Equatable {
@@ -14,6 +13,7 @@ struct OutputDeviceInfo: Sendable, Equatable {
     let uid: String
     let name: String
     let transportType: UInt32
+    let dataSource: UInt32
 }
 
 enum ProcessEnumerator {
@@ -25,40 +25,25 @@ enum ProcessEnumerator {
         )
     }
 
-    static func info(for object: AudioObjectID, includeDeviceIDs: Bool = false) -> AudioProcessInfo? {
+    static func isRunningOutput(_ object: AudioObjectID) -> Bool {
+        CA.uint32(object, CA.address(kAudioProcessPropertyIsRunningOutput)) != 0
+    }
+
+    static func info(for object: AudioObjectID) -> AudioProcessInfo? {
         let pidVal = CA.value(
             object, CA.address(kAudioProcessPropertyPID), default: pid_t(-1)
         )
         let bundleID = CA.cfString(object, CA.address(kAudioProcessPropertyBundleID)) ?? ""
-        let running = CA.uint32(object, CA.address(kAudioProcessPropertyIsRunningOutput)) != 0
-        let devices: [AudioObjectID] = includeDeviceIDs ? CA.array(
-            object, CA.address(kAudioProcessPropertyDevices), of: AudioObjectID.self
-        ) : []
         return AudioProcessInfo(
             objectID: object,
             pid: pidVal,
             bundleID: bundleID,
-            isRunningOutput: running,
-            deviceIDs: devices
+            isRunningOutput: isRunningOutput(object)
         )
     }
 
-    static func allProcesses(includeDeviceIDs: Bool = false) -> [AudioProcessInfo] {
-        processObjectIDs().compactMap { info(for: $0, includeDeviceIDs: includeDeviceIDs) }
-    }
-
-    static func playingBundleIDs() -> Set<String> {
-        activeBundleIDs(processObjectIDs(), isRunning: {
-            CA.uint32($0, CA.address(kAudioProcessPropertyIsRunningOutput)) != 0
-        }, bundleID: { CA.cfString($0, CA.address(kAudioProcessPropertyBundleID)) })
-    }
-
-    static func activeBundleIDs(_ ids: [AudioObjectID], isRunning: (AudioObjectID) -> Bool,
-                                bundleID: (AudioObjectID) -> String?) -> Set<String> {
-        Set(ids.compactMap { id in
-            guard isRunning(id), let bundle = bundleID(id), !bundle.isEmpty else { return nil }
-            return bundle
-        })
+    static func allProcesses() -> [AudioProcessInfo] {
+        processObjectIDs().compactMap(info(for:))
     }
 
     /// Resolve a live PID to its CoreAudio process object. Works even before the
@@ -99,7 +84,10 @@ enum ProcessEnumerator {
             ?? CA.cfString(object, CA.address(kAudioDevicePropertyDeviceNameCFString))
             ?? uid
         let transport = CA.uint32(object, CA.address(kAudioDevicePropertyTransportType))
-        return OutputDeviceInfo(objectID: object, uid: uid, name: name, transportType: transport)
+        let source = CA.uint32Value(object, AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDataSource, mScope: kAudioObjectPropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain)) ?? 0
+        return OutputDeviceInfo(objectID: object, uid: uid, name: name, transportType: transport, dataSource: source)
     }
 
     static func defaultOutputDeviceUID() -> String? {
@@ -128,18 +116,55 @@ enum ProcessEnumerator {
             return device(for: id)
         }
     }
+}
 
-    /// Resolve a set of bundle IDs to the live (process, output device) pairs that
-    /// should each get their own tap chain.
-    static func resolve(bundleIDs: Set<String>) -> [(process: AudioProcessInfo, device: OutputDeviceInfo)] {
-        var pairs: [(AudioProcessInfo, OutputDeviceInfo)] = []
-        for proc in allProcesses(includeDeviceIDs: true) where bundleIDs.contains(proc.bundleID) {
-            for devID in proc.deviceIDs {
-                if let dev = device(for: devID) {
-                    pairs.append((proc, dev))
-                }
+/// The object list is re-read on every call; PID and bundle ID never change for a live object,
+/// so only the running flag is refreshed while the list is stable and the snapshot is older than `ttl`.
+final class ProcessSnapshotCache: @unchecked Sendable {
+    struct Readers: Sendable {
+        var objectIDs: @Sendable () -> [AudioObjectID]
+        var info: @Sendable (AudioObjectID) -> AudioProcessInfo?
+        var isRunningOutput: @Sendable (AudioObjectID) -> Bool
+
+        static let live = Readers(objectIDs: { ProcessEnumerator.processObjectIDs() },
+                                  info: { ProcessEnumerator.info(for: $0) },
+                                  isRunningOutput: { ProcessEnumerator.isRunningOutput($0) })
+    }
+
+    private let lock = NSLock()
+    private let readers: Readers
+    private let ttl: Duration
+    private var objectIDs: [AudioObjectID] = []
+    private var processes: [AudioProcessInfo] = []
+    private var refreshedAt: ContinuousClock.Instant?
+
+    init(ttl: Duration = .seconds(1), readers: Readers = .live) {
+        self.ttl = ttl
+        self.readers = readers
+    }
+
+    func snapshot(now: ContinuousClock.Instant = .now) -> [AudioProcessInfo] {
+        let ids = readers.objectIDs()
+        lock.lock()
+        defer { lock.unlock() }
+        if ids == objectIDs {
+            if let refreshedAt, refreshedAt.duration(to: now) < ttl { return processes }
+            processes = processes.map { process in
+                var refreshed = process
+                refreshed.isRunningOutput = readers.isRunningOutput(process.objectID)
+                return refreshed
             }
+        } else {
+            processes = ids.compactMap(readers.info)
+            objectIDs = ids
         }
-        return pairs.map { (process: $0.0, device: $0.1) }
+        refreshedAt = now
+        return processes
+    }
+
+    func invalidate() {
+        lock.lock()
+        refreshedAt = nil
+        lock.unlock()
     }
 }

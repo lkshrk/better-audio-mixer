@@ -34,7 +34,6 @@ mixer/router for macOS built on the CoreAudio process-tap API.
 | AudioEngine | `BamKit/Sources/AudioEngine/` | CoreAudio taps + aggregate |
 | BamControlKit | `BamKit/Sources/BamControlKit/` | control socket server |
 | BAMStreamDeck | `BamKit/Sources/BAMStreamDeck/` | Stream Deck plugin |
-| BAMDriver | `BAMDriver/` | optional virtual audio driver (C, GPL) |
 
 ## See also
 

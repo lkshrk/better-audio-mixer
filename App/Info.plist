@@ -30,5 +30,7 @@
 	<string>bam captures audio from other apps to display live level meters.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>© 2026 lkshrk. MIT License.</string>
 </dict>
 </plist>

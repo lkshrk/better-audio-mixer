@@ -1,8 +1,41 @@
 import BamCore
 import SwiftUI
 
-/// Global master strip pinned at the right: one fader scaling every mix's output
-/// (folds into each mix level in the engine), with an aggregate meter.
+/// Leaf over the 30 Hz meter snapshot so only the meters re-render, not the whole strip.
+struct StripMeters: View {
+    let model: ConsoleViewModel
+    let mixID: String?
+    let active: Bool
+    let height: CGFloat
+
+    var body: some View {
+        let left = mixID.map(model.mixLevelLeft) ?? model.masterMeterLeft
+        let right = mixID.map(model.mixLevelRight) ?? model.masterMeterRight
+        let peakLeft = mixID.map(model.mixPeakLeft) ?? model.masterPeakLeft
+        let peakRight = mixID.map(model.mixPeakRight) ?? model.masterPeakRight
+        HStack(spacing: 6) {
+            Meter(level: left, peak: peakLeft, active: active, width: 5, height: height)
+            Meter(level: right, peak: peakRight, active: active, width: 5, height: height)
+        }
+    }
+}
+
+private extension KeyPress {
+    /// Perceptual step for ↑/↓ (1 %, ⇧ 5 %); nil for other keys.
+    var levelStep: Double? {
+        let direction: Double
+        switch key {
+        case .upArrow: direction = 1
+        case .downArrow: direction = -1
+        default: return nil
+        }
+        return direction * (modifiers.contains(.shift) ? 0.05 : 0.01)
+    }
+
+    var isMuteToggle: Bool { key == "m" && phase == .down }
+}
+
+/// Master strip pinned at the right: the routed hardware device's own volume, with an aggregate meter.
 struct MasterStrip: View {
     @Environment(\.theme) private var t
     @Bindable var model: ConsoleViewModel
@@ -10,6 +43,9 @@ struct MasterStrip: View {
     @State private var level: Double = 1.0
     @State private var pickingOutput = false
     @State private var showingRecoveryStatus = false
+    @FocusState private var focused: Bool
+
+    private var muted: Bool { model.masterMuted }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -29,9 +65,10 @@ struct MasterStrip: View {
             GeometryReader { geo in
                 let h = max(80, geo.size.height)
                 HStack(spacing: 10) {
-                    Meter(level: model.masterMeter, active: !model.masterMuted, width: 7, height: h)
-                    Meter(level: model.masterMeter, active: !model.masterMuted, width: 7, height: h)
-                    Fader(value: $level, accentTrack: !model.masterMuted, height: h, linear: true) {
+                    StripMeters(model: model, mixID: nil, active: !muted, height: h)
+                    Fader(value: $level, accentTrack: !muted, dimmed: muted, height: h, linear: true,
+                          accessibilityLabel: "Master level",
+                          onChange: { model.setOutputVolume($0, origin: "ui:drag") }) {
                         model.setOutputVolume(level)
                     }
                 }
@@ -43,14 +80,17 @@ struct MasterStrip: View {
             HStack(spacing: 1) {
                 Text(verbatim: "\(Int((level * 100).rounded()))")
                     .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(t.text)
+                    .foregroundStyle(muted ? t.dim : t.text)
                 Text("%").font(.system(size: 12, weight: .semibold, design: .monospaced)).foregroundStyle(t.dim)
             }
+            .strikethrough(muted)
             .padding(.vertical, 9)
 
-            IconBtn(label: "M", active: model.masterMuted, danger: true) {
-                model.setMasterMuted(!model.masterMuted)
+            IconBtn(label: "M", active: muted, danger: true) {
+                model.setMasterMuted(!muted)
             }
+            .accessibilityLabel("Mute")
+            .accessibilityValue(muted ? "on" : "off")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -68,17 +108,37 @@ struct MasterStrip: View {
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 14)
-                        .strokeBorder(t.accent.opacity(0.32), lineWidth: 1)
+                        .strokeBorder(t.accent.opacity(focused ? 1 : 0.32), lineWidth: 1)
                 )
         )
+        .focusable()
+        .focused($focused)
+        .focusEffectDisabled()
+        .onKeyPress(phases: [.down, .repeat, .up], action: handleKey)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Master")
         .padding(.trailing, 12)
         .onAppear { level = model.outputVolume }
         .onChange(of: model.outputVolume) { _, new in level = new }
     }
 
-    /// Hardware-output selector that replaces the old "Master / STEREO" identity:
-    /// picks the physical device the Default output feeds; the fader below then
-    /// drives that device's own OS volume.
+    private func handleKey(_ press: KeyPress) -> KeyPress.Result {
+        if let step = press.levelStep {
+            if press.phase == .up {
+                model.setOutputVolume(level)
+            } else {
+                level = min(1, max(0, level + step))
+                model.setOutputVolume(level, origin: "ui:key")
+            }
+            return .handled
+        }
+        if press.isMuteToggle {
+            model.setMasterMuted(!muted)
+            return .handled
+        }
+        return .ignored
+    }
+
     private var outputSelector: some View {
         Button { pickingOutput.toggle() } label: {
             VStack(spacing: 7) {
@@ -118,8 +178,8 @@ struct AudioRecoveryPill: View {
     private var tone: Color {
         switch state {
         case .ok: t.accent
-        case .recovering: Color(hex: "f2b84b")
-        case .paused: Color(hex: "ff5b5b")
+        case .recovering: Theme.warning
+        case .paused: Theme.danger
         }
     }
 
@@ -224,8 +284,6 @@ private struct AudioRecoveryStatusPopover: View {
     }
 }
 
-/// Popover list of hardware output devices, centered under the master strip's
-/// output selector — mirrors the app picker's presentation for consistency.
 struct OutputList: View {
     @Environment(\.theme) private var t
     @Bindable var model: ConsoleViewModel
@@ -271,9 +329,7 @@ struct OutputList: View {
     }
 }
 
-/// One output device as a vertical channel strip: renamable identity + the apps
-/// routed into it, a single master meter + fader, dB readout, and mute. Apps are
-/// a membership list (added via the panel); the fader controls the whole device.
+/// One output device as a channel strip: identity, routed apps, meters + fader, readout, mute.
 struct DeviceStrip: View {
     @Environment(\.theme) private var t
     @Bindable var model: ConsoleViewModel
@@ -285,6 +341,7 @@ struct DeviceStrip: View {
     @State private var panel = false
     @StateObject private var emojiCatcher = EmojiCatcher()
     @FocusState private var nameFocused: Bool
+    @FocusState private var focused: Bool
 
     private var muted: Bool { model.deviceMuted(mix.id) }
     private var offline: Bool { model.failedMixIDs.contains(mix.id) }
@@ -298,9 +355,10 @@ struct DeviceStrip: View {
             GeometryReader { geo in
                 let h = max(80, geo.size.height)
                 HStack(spacing: 10) {
-                    Meter(level: model.mixLevel(mix.id), active: live, width: 7, height: h)
-                    Meter(level: model.mixLevel(mix.id), active: live, width: 7, height: h)
-                    Fader(value: $level, accentTrack: live, height: h) {
+                    StripMeters(model: model, mixID: mix.id, active: live, height: h)
+                    Fader(value: $level, accentTrack: live, dimmed: muted, height: h,
+                          accessibilityLabel: "\(mix.name) level",
+                          onChange: { model.previewDeviceLevel(mix.id, $0) }) {
                         model.setDeviceLevel(mix.id, level)
                     }
                 }
@@ -309,20 +367,28 @@ struct DeviceStrip: View {
             .padding(.top, 10)
             .frame(maxHeight: .infinity)
 
-            HStack(spacing: 1) {
-                Text(verbatim: "\(AudioTaper.percent(fromGain: level))")
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(t.text)
-                Text("%").font(.system(size: 12, weight: .semibold, design: .monospaced)).foregroundStyle(t.dim)
+            VStack(spacing: 1) {
+                HStack(spacing: 1) {
+                    Text(verbatim: "\(AudioTaper.percent(fromGain: level))")
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(muted ? t.dim : t.text)
+                    Text("%").font(.system(size: 12, weight: .semibold, design: .monospaced)).foregroundStyle(t.dim)
+                }
+                Text(verbatim: Readout.dbLabel(gain: level))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(t.dim)
             }
-            .padding(.vertical, 9)
+            .strikethrough(muted)
+            .padding(.vertical, 7)
 
             HStack(spacing: 6) {
                 IconBtn(label: "M", active: muted, danger: true) {
                     model.setDeviceMuted(mix.id, !muted)
                 }
+                .accessibilityLabel("Mute")
+                .accessibilityValue(muted ? "on" : "off")
                 if offline {
-                    Pill(tone: Color(hex: "ff5b5b")) {
+                    Pill(tone: Theme.danger) {
                         Label("Offline", systemImage: "exclamationmark.triangle.fill").labelStyle(.iconOnly)
                     }
                     .help(model.routerStatusMessage ?? "Offline")
@@ -337,9 +403,15 @@ struct DeviceStrip: View {
                 .fill(t.surface.opacity(0.45))
                 .overlay(
                     RoundedRectangle(cornerRadius: 14)
-                        .strokeBorder(t.line.opacity(0.7), lineWidth: 1)
+                        .strokeBorder(focused ? t.accent : t.line.opacity(0.7), lineWidth: 1)
                 )
         )
+        .focusable()
+        .focused($focused)
+        .focusEffectDisabled()
+        .onKeyPress(phases: [.down, .repeat, .up], action: handleKey)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(mix.name)
         .padding(.horizontal, 6)
         .onAppear { level = mix.level }
         .onChange(of: mix.level) { _, new in level = new }
@@ -355,8 +427,7 @@ struct DeviceStrip: View {
         .sheet(isPresented: $renaming) { editSheet }
     }
 
-    // A sheet (not a popover) so the system emoji viewer can open over it without
-    // dismissing it or shoving the window to the back.
+    // A sheet, not a popover: the system emoji viewer would dismiss a popover.
     private var editSheet: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Edit Device")
@@ -394,7 +465,6 @@ struct DeviceStrip: View {
         .focusEffectDisabled()
     }
 
-    // SF Symbol line glyphs — one monochrome icon language, no glossy color emoji.
     private static let iconChoices = [
         "🎧", "🎙️", "🔊", "🎵", "🎮",
         "💬", "🎬", "🌐", "📞", "🔔", "📚",
@@ -434,18 +504,14 @@ struct DeviceStrip: View {
         }
     }
 
-    // The identity tile owns the default monogram and any *custom* emoji (one
-    // not in the preset grid); a preset selection lights its own tile instead.
+    // A preset emoji lights its own tile; the identity tile owns the monogram and any custom emoji.
     private var identityCustom: String? {
         guard let e = mix.emoji, !DeviceIcon.isSymbol(e), !Self.iconChoices.contains(e) else { return nil }
         return e
     }
     private var identitySelected: Bool { mix.emoji == nil || identityCustom != nil }
 
-    // First grid tile doubles as the custom-emoji sink. An AppKit field (not a
-    // SwiftUI `.focused()` one) so we can call `makeFirstResponder` explicitly
-    // right before opening the emoji viewer — otherwise the viewer inserts the
-    // glyph into whatever field already holds first responder (the name field).
+    // AppKit field so `makeFirstResponder` runs before the emoji viewer opens; otherwise the glyph lands in the name field.
     private var identityTile: some View {
         ZStack {
             EmojiCatcherField(catcher: emojiCatcher) { picked in
@@ -521,10 +587,26 @@ struct DeviceStrip: View {
         model.renameDevice(mix.id, to: draftName)
         renaming = false
     }
+
+    private func handleKey(_ press: KeyPress) -> KeyPress.Result {
+        if let step = press.levelStep {
+            if press.phase == .up {
+                model.setDeviceLevel(mix.id, level)
+            } else {
+                let pos = min(1, max(0, AudioTaper.position(fromGain: level) + step))
+                level = AudioTaper.gain(fromPosition: pos)
+                model.previewDeviceLevel(mix.id, level)
+            }
+            return .handled
+        }
+        if press.isMuteToggle {
+            model.setDeviceMuted(mix.id, !muted)
+            return .handled
+        }
+        return .ignored
+    }
 }
 
-/// One tile in the device icon grid: a colored monogram chip (default), an SF
-/// Symbol line glyph, or the "more" affordance that opens the system emoji viewer.
 private struct IconTile: View {
     enum Kind { case emoji(String), more }
     @Environment(\.theme) private var t
@@ -563,8 +645,6 @@ private struct IconTile: View {
     }
 }
 
-/// One swatch in the device color row: a 24pt circle, or a dashed "+" for the
-/// automatic (palette-derived) hue. Selected wears a purple outer ring.
 private struct ColorDot: View {
     @Environment(\.theme) private var t
     let swatch: Color
@@ -607,7 +687,7 @@ struct AppStack: View {
     var body: some View {
         HStack(spacing: 5) {
             HStack(spacing: -7) {
-                ForEach(Array(apps.prefix(3).enumerated()), id: \.offset) { _, a in
+                ForEach(apps.prefix(3)) { a in
                     AppIcon(bundleID: a.bundleID, fallbackMono: a.mono, color: a.color, size: 17, radius: 5)
                         .overlay(RoundedRectangle(cornerRadius: 5).stroke(t.surface, lineWidth: 1.5))
                 }
@@ -625,8 +705,7 @@ struct AppStack: View {
     }
 }
 
-/// Wavelink-style searchable app picker: real icons, live filter, tap to route
-/// (moves the app into this device). Stays open so several apps can be added.
+/// Searchable app picker; stays open so several apps can be added in a row.
 struct AppPicker: View {
     @Environment(\.theme) private var t
     @Bindable var model: ConsoleViewModel
@@ -704,9 +783,7 @@ struct AppPicker: View {
 
 // MARK: - Emoji capture
 
-/// Holds the AppKit text field behind the identity tile and force-focuses it
-/// before opening the system emoji viewer, so the picked glyph is inserted here
-/// rather than into whatever SwiftUI field happens to hold first responder.
+/// Focuses the hidden AppKit field before opening the emoji viewer so the glyph lands there.
 @MainActor
 final class EmojiCatcher: ObservableObject {
     fileprivate weak var field: NSTextField?
@@ -714,13 +791,11 @@ final class EmojiCatcher: ObservableObject {
     func openPicker() {
         guard let field, let win = field.window else { return }
         win.makeFirstResponder(field)
-        // Open on the next runloop so first-responder is settled first.
+        // Next runloop turn: first responder must settle before the palette opens.
         DispatchQueue.main.async { NSApp.orderFrontCharacterPalette(nil) }
     }
 }
 
-/// Invisible AppKit text field that receives the glyph chosen in the emoji
-/// viewer and reports just the last grapheme (or nil if cleared).
 private struct EmojiCatcherField: NSViewRepresentable {
     let catcher: EmojiCatcher
     let onPick: (String?) -> Void
@@ -751,7 +826,7 @@ private struct EmojiCatcherField: NSViewRepresentable {
         func controlTextDidChange(_ note: Notification) {
             guard let tf = note.object as? NSTextField else { return }
             let picked = EmojiInput.lastGrapheme(of: tf.stringValue)
-            tf.stringValue = picked ?? ""   // keep only the newest glyph
+            tf.stringValue = picked ?? ""
             onPick(picked)
         }
     }

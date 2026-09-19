@@ -125,6 +125,7 @@ echo "==> Building Stream Deck plugin"
 
 echo "==> Installing plugin bundle"
 mkdir -p "$(dirname "$INSTALL_DIR")"
+rm -rf "$INSTALL_DIR"
 /usr/bin/ditto "$PLUGIN" "$INSTALL_DIR"
 
 echo "==> Verifying installed helper hash"

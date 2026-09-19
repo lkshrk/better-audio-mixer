@@ -6,24 +6,37 @@ import Observation
 import os
 import SwiftUI
 
+enum Tuning {
+    static let controlPushInterval: Duration = .milliseconds(33)
+    static let appPollInterval: Duration = .seconds(2)
+    static let persistDebounce: Duration = .milliseconds(300)
+    static let rampSteps = 24
+    static let rampStepDelay: Duration = .milliseconds(50)
+    static let exitTeardownTimeout: Duration = .seconds(4)
+    static let recoveryBackoffFloorSeconds: UInt64 = 2
+    static let recoveryBackoffCapSeconds: UInt64 = 30
+    static let faderChangeInterval: TimeInterval = 1.0 / 30
+    static let titleBarHeight: CGFloat = 38
+}
+
 @MainActor
 @Observable
 final class ConsoleViewModel {
     var config = BamConfig()
     private(set) var snapshot: RouterSnapshot = .silent
+    private(set) var mixPeaks: [String: StereoPeak] = [:]
+    private(set) var masterPeak = StereoPeak()
+    var now: () -> TimeInterval = { Date.timeIntervalSinceReferenceDate }
     private(set) var runningApps: [AudioApp] = []
     private(set) var playing: Set<String> = []
     private(set) var outputDevices: [AudioDevice] = []
     private(set) var failedMixIDs: Set<String> = []
     private(set) var audioRecoveryDisplayState: AudioRecoveryDisplayState = .ok
-    /// Dominant reason the router is not fully online, for surfacing in the UI
-    /// (e.g. "waiting for permission" vs "no output device"). `.ok` /
-    /// `.noSourcesRunning` are healthy/idle.
     private(set) var routerStatus: RouterStatus = .ok
     var error: String?
+    /// Sticks for the session, unlike `error`, which the next successful apply clears.
+    private(set) var configWarning: String?
 
-    /// Human-readable reason the router is offline, for the strip's Offline badge
-    /// tooltip. nil when healthy or merely idle (no app producing audio).
     var routerStatusMessage: String? {
         switch routerStatus.cause {
         case .ok, .noSourcesRunning: return nil
@@ -33,23 +46,20 @@ final class ConsoleViewModel {
         }
     }
     var activeMixID: String?
-    var dark = true
-    var openGroupID: String?
 
-    /// Hidden dev switch: when off, the CoreAudio router (slot-claim + taps) is
-    /// never started, so the machine keeps its normal sound while you work on the
-    /// UI. Persisted in UserDefaults; env var BAM_DISABLE_DRIVER forces it off.
+    /// Dev switch: off keeps the CoreAudio router down so the machine keeps its normal sound; BAM_DISABLE_DRIVER forces it off.
     var driverEnabled: Bool {
         didSet {
             guard driverEnabled != oldValue else { return }
             defaults.set(driverEnabled, forKey: Self.driverKey)
-            Task { await self.reloadRouter() }
+            scheduleRouterReload()
         }
     }
     static let driverKey = "bam.driverEnabled"
 
     let engine: any AudioEngineProtocol
     let defaults: UserDefaults
+    let protection: OutputProtection
     var configURL: URL?
     private var meterTask: Task<Void, Never>?
     private var appsTask: Task<Void, Never>?
@@ -57,9 +67,11 @@ final class ConsoleViewModel {
     private var recoveryCause: RouterFailureCause?
     private var recoveryGeneration = 0
     var recoverySleep: @MainActor (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
-    var outputRampSleep: @MainActor (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
     private var routerEventTask: Task<Void, Never>?
     private var routerRecoveryEventTask: Task<Void, Never>?
+    private var reloadTask: Task<Void, Never>?
+    private var persistTask: Task<Void, Never>?
+    private var pendingPersist: BamConfig?
     private var defaultOutputUID: String?
     var controlServer: ControlServer?
     private var controlPushTask: Task<Void, Never>?
@@ -74,14 +86,11 @@ final class ConsoleViewModel {
         var muteUIDs: Set<String> = []
     }
     var pendingOutputTargets: OutputTargets?
-    var requestedOutputVolumes: [String: Float] = [:]
-    var rampOutputTargets: [String: Float] = [:]
-    var stockOutputStates: [String: OutputDeviceState] = [:]
-    var outputCalibrations: [String: OutputDeviceState] = [:]
     var routerWorkGeneration = 0
+    // Once set, queued router work never runs again: a late startup rebuild must not re-mute after the exit restore.
+    private(set) var exiting = false
 
-    /// The catch-all device. Its source is the `.rest` remainder; it routes every
-    /// app not claimed by another device to the system default hardware output.
+    /// The catch-all device: its `.rest` source routes every unclaimed app to the system default output.
     static let defaultMixID = "mix-default"
     static let restSourceID = "src-rest"
 
@@ -89,33 +98,26 @@ final class ConsoleViewModel {
          defaults: UserDefaults = .standard) {
         self.engine = engine
         self.defaults = defaults
+        protection = OutputProtection(engine: engine, defaults: defaults)
         if ProcessInfo.processInfo.environment["BAM_DISABLE_DRIVER"] != nil {
             driverEnabled = false
         } else if defaults.object(forKey: Self.driverKey) != nil {
             driverEnabled = defaults.bool(forKey: Self.driverKey)
         } else {
-            // Dev builds default the driver OFF so UI work keeps normal system
-            // sound; the Release build installed to /Applications routes for real.
             #if DEBUG
             driverEnabled = false
             #else
             driverEnabled = true
             #endif
         }
-        // Seed the fader from the level saved at last exit so it shows what it will
-        // restore to, instead of flashing 100% before the async restore lands.
         if defaults.object(forKey: Self.savedVolumeKey) != nil {
             outputVolume = defaults.double(forKey: Self.savedVolumeKey)
         }
+        protection.onVolumeWritten = { [weak self] uid, volume in
+            guard let self, uid == self.systemOutputUID else { return }
+            self.outputVolume = Double(volume)
+        }
         AppLog.app.debug("initialized driverEnabled=\(self.driverEnabled, privacy: .public)")
-    }
-
-    var mixes: [Mix] { config.mixes }
-    var sources: [Source] { config.sources }
-
-    var activeMix: Mix? {
-        if let id = activeMixID, let m = config.mixes.first(where: { $0.id == id }) { return m }
-        return config.mixes.first
     }
 
     // MARK: lifecycle
@@ -123,32 +125,48 @@ final class ConsoleViewModel {
     func start() async {
         AppLog.app.debug("start driverEnabled=\(self.driverEnabled, privacy: .public)")
         defaultOutputUID = await engine.defaultOutputUID()
-        do {
-            let (url, cfg) = try ConfigStore.loadOrSeed(seed: Self.seedYAML())
-            configURL = url
-            AppLog.config.info("loaded config url=\(url.path, privacy: .private) mixes=\(cfg.mixes.count, privacy: .public) sources=\(cfg.sources.count, privacy: .public)")
-            if cfg.mixes.isEmpty && cfg.sources.isEmpty {
-                config = Self.normalize(Self.seedConfig(), defaultOutput: defaultOutputUID)
-            } else {
-                config = Self.normalize(cfg, defaultOutput: defaultOutputUID)
-            }
-            persist(config)
-        } catch {
-            self.error = String(describing: error)
-            AppLog.config.error("load failed: \(String(describing: error), privacy: .public)")
-            config = Self.normalize(Self.seedConfig(), defaultOutput: defaultOutputUID)
-        }
+        loadConfig()
         if activeMixID == nil { activeMixID = config.mixes.first?.id }
         stageSavedOutputVolume()
-        await captureStockVolume()
-        // startRouterGuarded owns setup protection and restores only a safe route.
+        await captureStockOutputState()
         await subscribe()
         startControlServer()
     }
 
-    /// Stand up the Stream Deck control socket and feed it the current snapshot at
-    /// ~12fps. The server reads the latest pushed snapshot on its own timer, so a
-    /// steady push keeps remote clients live without coupling to the router stream.
+    private func loadConfig() {
+        do {
+            let (url, cfg) = try ConfigStore.loadOrSeed(seed: Self.seedYAML())
+            configURL = url
+            AppLog.config.info("loaded config url=\(url.path, privacy: .private) mixes=\(cfg.mixes.count, privacy: .public) sources=\(cfg.sources.count, privacy: .public)")
+            let base = cfg.mixes.isEmpty && cfg.sources.isEmpty ? Self.seedConfig() : cfg
+            config = Self.normalize(base, defaultOutput: defaultOutputUID)
+            if config != cfg { persist(config) }
+        } catch {
+            AppLog.config.error("load failed: \(String(describing: error), privacy: .public)")
+            config = Self.normalize(Self.seedConfig(), defaultOutput: defaultOutputUID)
+            guard let url = try? ConfigStore.defaultURL(), FileManager.default.fileExists(atPath: url.path) else {
+                self.error = String(describing: error)
+                return
+            }
+            let broken = Self.quarantineURL(for: url)
+            do {
+                try FileManager.default.moveItem(at: url, to: broken)
+            } catch let moveError {
+                self.error = String(describing: moveError)
+                return
+            }
+            configURL = url
+            configWarning = "Config couldn't be read and was reset; the original is kept as \(broken.lastPathComponent)."
+            persist(config)
+        }
+    }
+
+    static func quarantineURL(for url: URL, date: Date = .now) -> URL {
+        let stamp = date.formatted(.iso8601.year().month().day().time(includingFractionalSeconds: false))
+            .replacingOccurrences(of: ":", with: "-")
+        return url.appendingPathExtension("broken-\(stamp)")
+    }
+
     private func startControlServer() {
         let server = ControlServer()
         server.mixer = self
@@ -159,20 +177,15 @@ final class ConsoleViewModel {
             while !Task.isCancelled {
                 guard let self else { break }
                 self.controlServer?.pushSnapshot(self.controlSnapshot)
-                try? await Task.sleep(for: .milliseconds(83))
+                try? await Task.sleep(for: Tuning.controlPushInterval)
             }
         }
     }
 
-    /// Remember the device's *stock* volume — its level right now, before bam has
-    /// touched anything — so exit can restore it once our taps are torn down and
-    /// normal direct-to-device playback is back. Captured every launch; the device
-    /// is left exactly as is (no dim, no mute) so the pre-setup window just plays at
-    /// the user's own normal level.
-    private func captureStockVolume() async {
+    /// Records the device's pre-bam state so exit can put it back once taps are gone.
+    private func captureStockOutputState() async {
         guard let uid = systemOutputUID else { return }
-        guard let state = await captureOutputState(uid: uid) else { return }
-        defaults.set(Double(state.volume), forKey: Self.stockVolumeKey)
+        _ = await protection.capture(uid: uid)
     }
 
     /// Headless entry for previews/mocks: no disk, just drive the engine + meters.
@@ -181,7 +194,7 @@ final class ConsoleViewModel {
         self.config = Self.normalize(config, defaultOutput: defaultOutputUID)
         activeMixID = self.config.mixes.first?.id
         stageSavedOutputVolume()
-        await captureStockVolume()
+        await captureStockOutputState()
         await subscribe()
     }
 
@@ -194,7 +207,16 @@ final class ConsoleViewModel {
         startAppPolling()
     }
 
-    /// Start or tear down the router live when the dev driver toggle flips.
+    private func scheduleRouterReload() {
+        reloadTask?.cancel()
+        let previous = reloadTask
+        reloadTask = Task { [weak self] in
+            await previous?.value
+            guard let self, !Task.isCancelled else { return }
+            await self.reloadRouter()
+        }
+    }
+
     private func reloadRouter() async {
         if driverEnabled {
             await startRouterSubscriptions(reason: "reload starting router")
@@ -210,6 +232,7 @@ final class ConsoleViewModel {
     }
 
     private func startRouterSubscriptions(reason: StaticString) async {
+        guard !exiting else { return }
         AppLog.router.debug("\(reason, privacy: .public)")
         await enqueueRouterWork { model in await model.startRouterReconciling() }.value
         subscribeRouterEvents()
@@ -217,8 +240,27 @@ final class ConsoleViewModel {
         let stream = await engine.routerSnapshots()
         meterTask?.cancel()
         meterTask = Task { [weak self] in
-            for await s in stream { self?.snapshot = s }
+            for await s in stream {
+                guard let self else { return }
+                self.receiveSnapshot(s)
+            }
         }
+    }
+
+    /// Peaks decay on every tick; `snapshot` and the peaks are assigned only when they actually changed.
+    func receiveSnapshot(_ s: RouterSnapshot) {
+        if s != snapshot { snapshot = s }
+        let t = now()
+        var peaks: [String: StereoPeak] = [:]
+        for m in s.mixes {
+            var p = mixPeaks[m.id] ?? StereoPeak()
+            p.update(left: m.levelLeft, right: m.levelRight, at: t)
+            peaks[m.id] = p
+        }
+        if peaks != mixPeaks { mixPeaks = peaks }
+        var master = masterPeak
+        master.update(left: masterMeterLeft, right: masterMeterRight, at: t)
+        if master != masterPeak { masterPeak = master }
     }
 
     private func stopRouterSubscriptions(reason: StaticString? = nil) {
@@ -240,6 +282,8 @@ final class ConsoleViewModel {
         applyRouterStatus(.ok)
         audioRecoveryDisplayState = .ok
         snapshot = .silent
+        mixPeaks = [:]
+        masterPeak = StereoPeak()
     }
 
     private func startAppPolling() {
@@ -247,28 +291,32 @@ final class ConsoleViewModel {
         appsTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { break }
-                self.runningApps = await self.engine.runningAudioApps()
-                self.outputDevices = await self.engine.outputDevices()
-                self.playing = await self.engine.playingBundleIDs()
-                await self.refreshOutputVolume()
-                try? await Task.sleep(for: .seconds(2))
+                await self.refreshAppState()
+                try? await Task.sleep(for: Tuning.appPollInterval)
             }
         }
     }
 
-    /// Start the router, fold its status, then persist any output UID the engine
-    /// had to re-bind: when the stored device re-enumerated under a new UID, the
-    /// engine resolves it against the live list, and we write the resolved UID back
-    /// so the Default mix points at the right device across restarts.
+    func refreshAppState() async {
+        let apps = await engine.runningAudioApps()
+        if apps != runningApps { runningApps = apps }
+        let devices = await engine.outputDevices()
+        if devices != outputDevices { outputDevices = devices }
+        let playingNow = await engine.playingBundleIDs()
+        if playingNow != playing { playing = playingNow }
+        await refreshOutputVolume()
+    }
+
+    /// Starts the router and writes back the UID the engine actually bound, so a re-enumerated device sticks across restarts.
     private func startRouterReconciling() async {
         let generation = routerWorkGeneration
         let requestedDestination = config.mixes.first { $0.id == Self.defaultMixID }?.dest
         let status = await startRouterGuarded(config: config)
-        guard generation == routerWorkGeneration, !Task.isCancelled, driverEnabled else { return }
+        guard !routerWorkStale(generation), driverEnabled else { return }
         applyRouterStatus(status)
         guard !status.isFailure,
               let bound = await engine.boundOutputUID(),
-              generation == routerWorkGeneration, !Task.isCancelled, driverEnabled,
+              !routerWorkStale(generation), driverEnabled,
               let i = config.mixes.firstIndex(where: { $0.id == Self.defaultMixID }),
               config.mixes[i].dest == requestedDestination
         else { return }
@@ -280,9 +328,7 @@ final class ConsoleViewModel {
         persist(config)
     }
 
-    /// Fold a `startRouter` result into UI state and (re)arm cause-aware recovery.
-    /// Single choke point for every router (re)start so status and recovery stay
-    /// consistent no matter which path triggered the build.
+    /// Single choke point for every router (re)start so status and recovery stay consistent.
     func applyRouterStatus(_ status: RouterStatus) {
         let previous = routerStatus
         routerStatus = status
@@ -306,13 +352,7 @@ final class ConsoleViewModel {
         scheduleRouterRecovery(for: status)
     }
 
-    /// Recovery is cause-aware. The event subscription (`subscribeRouterEvents`)
-    /// already retries the instant an app starts or a device appears, which heals
-    /// `noOutput` and `noSourcesRunning` with no polling. The only cause an event
-    /// can't catch is `permissionPending`: granting TCC fires no CoreAudio change.
-    /// `buildFailed` can also be a transient HAL/aggregate failure with no later
-    /// event. Both use a bounded backoff heartbeat (2→4→8→16→30s, capped) that
-    /// stops as soon as the router comes online or the driver is turned off.
+    /// Router events heal `noOutput`/`noSourcesRunning`; a TCC grant or transient HAL failure fires none, so those two causes get a bounded backoff heartbeat.
     private func scheduleRouterRecovery(for status: RouterStatus) {
         if driverEnabled, recoveryTask != nil, recoveryCause == status.cause { return }
         recoveryTask?.cancel(); recoveryTask = nil
@@ -324,7 +364,7 @@ final class ConsoleViewModel {
         recoveryCause = cause
         AppLog.router.debug("router recovery heartbeat scheduled cause=\(cause.rawValue, privacy: .public)")
         recoveryTask = Task { [weak self] in
-            var delay: UInt64 = 2
+            var delay = Tuning.recoveryBackoffFloorSeconds
             while !Task.isCancelled {
                 guard let sleep = self?.recoverySleep else { return }
                 do { try await sleep(.seconds(Double(delay))) } catch { return }
@@ -335,15 +375,11 @@ final class ConsoleViewModel {
                     await model.startRouterReconciling()
                 }.value
                 if self.routerStatus.cause != cause { return }
-                delay = min(delay * 2, 30)
+                delay = min(delay * 2, Tuning.recoveryBackoffCapSeconds)
             }
         }
     }
 
-    /// Retry the router the moment the system changes in a way that could let a
-    /// previously failed build succeed — an app starting (process-list change) or
-    /// an output device appearing (device-list change). Replaces blind polling for
-    /// `noOutput`/`noSourcesRunning`. One long-lived subscription per router start.
     private func subscribeRouterEvents() {
         routerEventTask?.cancel()
         routerEventTask = Task { [weak self] in
@@ -352,25 +388,32 @@ final class ConsoleViewModel {
             for await _ in events {
                 guard !Task.isCancelled, self.driverEnabled else { return }
                 AppLog.router.debug("router event received")
-                // Reflect device add/remove in the picker immediately instead of
-                // waiting on the 2s poll.
-                self.outputDevices = await self.engine.outputDevices()
-                // Await the queued pass so the newest-only stream bounds pending
-                // invalidations instead of turning each one into another Task.
-                await self.enqueueRouterWork { model in
-                    // Failed builds create their own HAL device events during teardown.
-                    // Let the heartbeat retry; hardware changes can wait at most 30s.
-                    guard model.routerStatus.cause != .buildFailed else { return }
-                    let checkedConfig = model.config
-                    let unchanged = await model.engine.canKeepCurrentRouter(config: checkedConfig)
-                    guard !Task.isCancelled else { return }
-                    let relevantOutputs = await model.engine.routerOutputUIDs(config: checkedConfig)
-                    if unchanged, model.config == checkedConfig,
-                       relevantOutputs.isDisjoint(with: model.guardedOutputs.keys) { return }
-                    await model.startRouterReconciling()
-                }.value
+                await self.reconcileRouterIfNeeded()
             }
         }
+    }
+
+    /// Rebuilds only when the live router can no longer serve `config`.
+    func reconcileRouterIfNeeded() async {
+        let devices = await engine.outputDevices()
+        if devices != outputDevices { outputDevices = devices }
+        await enqueueRouterWork { model in
+            // Failed builds emit HAL events during their own teardown; the heartbeat owns that retry.
+            guard model.routerStatus.cause != .buildFailed else { return }
+            let checkedConfig = model.config
+            let unchanged = await model.engine.canKeepCurrentRouter(config: checkedConfig)
+            guard !Task.isCancelled else { return }
+            let relevantOutputs = await model.engine.routerOutputUIDs(config: checkedConfig)
+            if unchanged, model.config == checkedConfig,
+               relevantOutputs.isDisjoint(with: model.protection.guarded.keys) { return }
+            await model.startRouterReconciling()
+        }.value
+    }
+
+    func systemDidWake() {
+        guard driverEnabled else { return }
+        AppLog.router.debug("system woke; reconciling")
+        Task { await reconcileRouterIfNeeded() }
     }
 
     private func subscribeRouterRecoveryEvents() {
@@ -429,50 +472,76 @@ final class ConsoleViewModel {
 
     func stop() async {
         AppLog.app.debug("stop")
+        flushPersist()
         controlPushTask?.cancel(); controlPushTask = nil
         controlServer?.stop(); controlServer = nil
+        reloadTask?.cancel()
+        await reloadTask?.value
+        reloadTask = nil
         stopRouterSubscriptions()
         await drainRouterWork()
         appsTask?.cancel(); appsTask = nil
         _ = await stopRouterGuarded()
     }
 
-    // MARK: master (the routed hardware device's own OS volume)
-
-    /// Volume scalar (0…1) of the hardware device the Default output feeds. The
-    /// master fader reads/writes this — i.e. it is the physical output's slider.
-    /// Seeded from the value saved at last exit so the fader shows the level it
-    /// will restore to, instead of flashing 100% before the async restore lands.
-    var outputVolume: Double = 1.0
-
-    /// The level to run the device at *while bam is live* (the summed-mix master).
-    /// Saved on exit (the current level), restored on launch once setup is ready.
-    static let savedVolumeKey = "bam.savedOutputVolume"
-
-    /// The device's *stock* level for normal, no-bam playback. Saved at launch
-    /// (before bam touches the volume), restored on exit after teardown.
-    static let stockVolumeKey = "bam.stockVolume"
-
-    /// Prevent hardware polls from surfacing temporary protection levels.
-    var restoringVolume = false
-
-    struct GuardedOutput {
-        var state: OutputDeviceState
-        let calibration: OutputDeviceState
-        var volume: Float {
-            get { state.volume }
-            set { state.volumes = calibration.withVolume(newValue).volumes }
+    /// Bounded exit: saves the running level, flags the exit mute, then restores the stock output state.
+    func prepareForExit() async -> Bool {
+        AppLog.app.debug("prepare for exit")
+        exiting = true
+        flushPersist()
+        controlPushTask?.cancel(); controlPushTask = nil
+        controlServer?.stop(); controlServer = nil
+        reloadTask?.cancel(); reloadTask = nil
+        stopRouterSubscriptions()
+        appsTask?.cancel(); appsTask = nil
+        if bamVolumeApplied, let uid = systemOutputUID, let state = await protection.capture(uid: uid) {
+            switch VolumePolicy.exit(applied: true, currentDeviceLevel: Double(state.volume), stockLevel: nil) {
+            case .teardownOnly: break
+            case let .persist(level, _): defaults.set(level, forKey: Self.savedVolumeKey)
+            }
         }
-        var muted: Bool {
-            get { state.muted }
-            set { state.mutes = newValue ? state.mutes.mapValues { _ in true } : ConsoleViewModel.outputStateWithMasterUnmuted(calibration).mutes }
+        protection.markExitMuted()
+        routerWorkGeneration += 1
+        let teardown = Task { await self.teardownForExit() }
+        let restored = await Self.awaitBounded(Tuning.exitTeardownTimeout, teardown) ?? false
+        AppLog.app.log(level: restored ? .debug : .error, "exit teardown restored=\(restored, privacy: .public)")
+        return restored
+    }
+
+    func teardownForExit() async -> Bool {
+        await engine.setRouterRecoverySuspended(true)
+        let retained = Set(protection.guarded.keys).union(protection.stockStates.keys)
+        let uids = await protectedOutputUIDs(for: config, retaining: retained)
+        guard await protection.protect(uids) else { return false }
+        await drainRouterWork()
+        guard await engine.stopRouterChecked() else { return false }
+        var request = OutputProtection.RestoreRequest()
+        request.toStock = true
+        return await protection.restore(uids: uids, request)
+    }
+
+    /// Waits for `task` up to `timeout` without cancelling it: a late teardown must finish muted, not half-restored.
+    nonisolated static func awaitBounded<T: Sendable>(_ timeout: Duration, _ task: Task<T, Never>) async -> T? {
+        await withTaskGroup(of: T?.self) { group in
+            group.addTask { await task.value }
+            group.addTask {
+                try? await Task.sleep(for: timeout)
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
         }
     }
-    // Keep user intent across failed rebuilds; HAL may reset the hardware to 100%.
-    var guardedOutputs: [String: GuardedOutput] = [:]
 
-    /// Only successful protected startup takes authority over the device volume.
-    /// Failed startup leaves the previous session's saved level intact on exit.
+    // MARK: master (the routed hardware device's own OS volume)
+
+    /// Volume scalar (0…1) of the hardware device the Default output feeds; seeded from the saved level so the fader never flashes 100%.
+    var outputVolume: Double = 1.0
+
+    static let savedVolumeKey = "bam.savedOutputVolume"
+
+    /// Only a successful protected start takes authority over the device volume; exit persists the running level only then.
     var bamVolumeApplied = false
 
     // MARK: apply
@@ -480,7 +549,14 @@ final class ConsoleViewModel {
     func applyTopology(_ mutate: (inout BamConfig) -> Void) { apply(topology: true, mutate) }
     func applyGains(_ mutate: (inout BamConfig) -> Void) { apply(topology: false, mutate) }
 
-    private func apply(topology: Bool, _ mutate: (inout BamConfig) -> Void) {
+    /// Live-drag path: routes the gain without persisting; `setDeviceLevel` persists on release.
+    func previewDeviceLevel(_ mixID: String, _ level: Double) {
+        apply(topology: false, persist: false) { cfg in
+            if let i = cfg.mixes.firstIndex(where: { $0.id == mixID }) { cfg.mixes[i].level = level }
+        }
+    }
+
+    private func apply(topology: Bool, persist shouldPersist: Bool = true, _ mutate: (inout BamConfig) -> Void) {
         var draft = config
         mutate(&draft)
         do { try draft.validate() } catch {
@@ -489,7 +565,7 @@ final class ConsoleViewModel {
         }
         error = nil
         config = draft
-        persist(draft)
+        if shouldPersist { persist(draft) }
         guard driverEnabled else { return }
         enqueueRouterMutation(topology: topology, draft: draft)
     }
@@ -511,29 +587,33 @@ final class ConsoleViewModel {
         enqueueRouterWork { model in
             let generation = model.routerWorkGeneration
             let status = await model.startRouterGuarded(config: draft)
-            guard !Task.isCancelled, generation == model.routerWorkGeneration else { return }
+            guard !model.routerWorkStale(generation) else { return }
             model.applyRouterStatus(status)
         }
+    }
+
+    func routerWorkStale(_ generation: Int) -> Bool {
+        Task.isCancelled || generation != routerWorkGeneration
     }
 
     @discardableResult
     func enqueueRouterWork(requiresDriver: Bool = true, isControlUpdate: Bool = false,
                            _ work: @escaping @MainActor (ConsoleViewModel) async -> Void) -> Task<Void, Never> {
-        // Every serialized operation is a boundary: a gain snapshot must never
-        // cross a later topology mutation and put its old routes back.
+        // A gain snapshot must never cross a later topology mutation and put its old routes back.
         if !isControlUpdate {
             pendingGains = nil
             pendingOutputTargets = nil
         }
         let previous = routerMutationTask
         let generation = routerWorkGeneration
-        routerMutationTask = Task { [weak self] in
+        let task = Task { [weak self] in
             await previous?.value
-            guard let self, (!requiresDriver || self.driverEnabled), !Task.isCancelled,
+            guard let self, !self.exiting, (!requiresDriver || self.driverEnabled), !Task.isCancelled,
                   self.routerWorkGeneration == generation else { return }
             await work(self)
         }
-        return routerMutationTask!
+        routerMutationTask = task
+        return task
     }
 
     private func drainRouterWork() async {
@@ -546,14 +626,24 @@ final class ConsoleViewModel {
         pendingOutputTargets = nil
     }
 
-    func pendingRouterWorkForExit() -> Task<Void, Never>? {
-        routerMutationTask?.cancel()
-        return routerMutationTask
+    /// Coalesces bursts (Stream Deck nudges, fader drags) into one write; `flushPersist` writes now.
+    func persist(_ cfg: BamConfig) {
+        guard configURL != nil else { return }
+        pendingPersist = cfg
+        guard persistTask == nil else { return }
+        persistTask = Task { [weak self] in
+            try? await Task.sleep(for: Tuning.persistDebounce)
+            guard !Task.isCancelled else { return }
+            self?.flushPersist()
+        }
     }
 
-    func persist(_ cfg: BamConfig) {
-        guard let url = configURL else { return }
-        do { try ConfigStore.save(cfg, to: url) } catch let err { self.error = String(describing: err) }
+    func flushPersist() {
+        persistTask?.cancel()
+        persistTask = nil
+        guard let cfg = pendingPersist, let url = configURL else { return }
+        pendingPersist = nil
+        do { try ConfigStore.save(cfg, to: url) } catch { self.error = String(describing: error) }
     }
 
     func nextFreeSlot() -> Int {
@@ -580,21 +670,22 @@ final class ConsoleViewModel {
 
     static func seedConfig() -> BamConfig { BamConfig() }
 
-    /// Guarantee a Default catch-all mix exists first. Seed an unset hardware
-    /// choice from macOS once; preserve the user's BAM output on later starts.
+    /// Guarantees a Default catch-all mix exists first; seeds an unset hardware choice from macOS once and keeps the user's BAM output afterwards.
     static func normalize(_ cfg: BamConfig, defaultOutput: String?) -> BamConfig {
         var c = cfg
-        if !c.sources.contains(where: { $0.kind == .rest }) {
-            c.sources.insert(Source(id: restSourceID, name: "Default", kind: .rest), at: 0)
+        let restID: String
+        if let rest = c.sources.first(where: { $0.kind == .rest }) {
+            restID = rest.id
+        } else {
+            restID = restSourceID
+            c.sources.insert(Source(id: restID, name: "Default", kind: .rest), at: 0)
         }
-        let restID = c.sources.first { $0.kind == .rest }!.id
         let dest: MixDestination = defaultOutput.map { .hardware(uid: $0) } ?? .virtualSlot(0)
         if let di = c.mixes.firstIndex(where: { $0.id == defaultMixID }) {
             c.mixes[di].name = "Default"
             if case .virtualSlot = c.mixes[di].dest { c.mixes[di].dest = dest }
             if !c.mixes[di].sends.contains(where: { $0.source == restID }) {
-                // Tapped (so the app's own output is muted) but not passed through:
-                // ungrouped audio is silenced until the user assigns it to a device.
+                // Tapped but muted: ungrouped audio stays silent until assigned to a device.
                 c.mixes[di].sends.append(Send(source: restID, muted: true))
             }
         } else {
@@ -611,7 +702,7 @@ final class ConsoleViewModel {
 }
 
 /// An app grouped under a source, resolved for the group panel UI.
-struct SourceApp: Identifiable {
+struct SourceApp: Identifiable, Equatable {
     let bundleID: String
     let name: String
     let playing: Bool

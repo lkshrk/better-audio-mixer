@@ -44,14 +44,14 @@ enum SingleInstanceGuard {
     }
 }
 
-/// Owns the window, the menu-bar status item, and the view model. The app is an
-/// LSUIElement agent (no dock icon); the status item is the only way in:
-/// left-click opens the window, right-click shows the controls menu.
+/// LSUIElement agent: the status item is the only way in (left-click window, right-click menu).
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let model = ConsoleViewModel()
     private var window: NSWindow!
     private var statusItem: NSStatusItem!
+    private var started = false
+    private var terminating = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if Self.isRunningUnderXCTest {
@@ -65,9 +65,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         buildWindow()
         buildStatusItem()
-        // Launch silent to the menu bar (agent app). The window opens on the
-        // status-item click — by then start() has loaded the saved config, so
-        // there's no empty "no devices yet" flash.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(systemDidWake), name: NSWorkspace.didWakeNotification, object: nil)
+        started = true
         Task { await model.start() }
     }
 
@@ -75,8 +75,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
-        model.dimOutputForExit()
+    /// A second instance or a test host never touched the hardware, so it exits at once.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard started, !terminating else { return .terminateNow }
+        terminating = true
+        Task { @MainActor in
+            _ = await model.prepareForExit()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
+    @objc private func systemDidWake(_ note: Notification) {
+        model.systemDidWake()
     }
 
     // MARK: - Window
@@ -100,11 +111,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showWindow() {
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
-        centerTrafficLights(barHeight: 38)
+        centerTrafficLights(barHeight: Tuning.titleBarHeight)
     }
 
-    // Vertically center the traffic-light buttons within our taller (38pt) custom
-    // bar so they line up with the brand row, instead of the default titlebar center.
     private func centerTrafficLights(barHeight: CGFloat) {
         let buttons = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton]
             .compactMap { window.standardWindowButton($0) }
@@ -156,11 +165,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
+        let about = NSMenuItem(title: "About BAM…", action: #selector(showAbout), keyEquivalent: "")
+        about.target = self
+        menu.addItem(about)
+
+        menu.addItem(.separator())
+
         let quit = NSMenuItem(title: "Quit BAM", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
 
         return menu
+    }
+
+    nonisolated static var shortVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
+    }
+
+    nonisolated static var versionLabel: String {
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String
+        return build.map { "BAM \(shortVersion) (\($0))" } ?? "BAM \(shortVersion)"
+    }
+
+    @objc private func showAbout() {
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.orderFrontStandardAboutPanel(nil)
     }
 
     @objc private func toggleDriver() { model.driverEnabled.toggle() }
@@ -178,9 +207,7 @@ struct BamApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     var body: some Scene {
-        // No SwiftUI scene window — the AppDelegate owns an AppKit window so it
-        // can survive close/reopen and stay out of the dock. This empty Settings
-        // scene satisfies the App protocol without showing anything.
+        // The AppDelegate owns the window; an empty Settings scene satisfies the App protocol.
         Settings { EmptyView() }
     }
 }

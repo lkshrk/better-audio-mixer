@@ -24,13 +24,19 @@ jobs:
             xcode: "26.6"
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode }}.app
 
       - name: Install XcodeGen
-        run: brew install xcodegen
+        run: |
+          curl -fsSL "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" -o "$RUNNER_TEMP/xcodegen.zip"
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP"
+          (cd "$RUNNER_TEMP/xcodegen" && sudo ./install.sh)
+          xcodegen --version
+        env:
+          XCODEGEN_VERSION: "2.46.0"
 
       - name: Generate project
         run: xcodegen generate
