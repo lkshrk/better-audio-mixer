@@ -121,6 +121,7 @@ final class RouterStartupIntentTests: XCTestCase {
     func testCompletedVolumeWriteDoesNotReplaceChangedOutputDisplay() async {
         let mock = MockAudioEngine()
         let model = await makeModel(mock)
+        model.stopAppPollingForTests()
         await mock.setOutputVolumeRestoreHookForTests { @MainActor in
             let index = model.config.mixes.firstIndex { $0.id == ConsoleViewModel.defaultMixID }!
             model.config.mixes[index].dest = .hardware(uid: "OtherOutput")

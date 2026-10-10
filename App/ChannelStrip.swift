@@ -316,6 +316,11 @@ struct OutputList: View {
                 Text(dev.name)
                     .font(.system(size: 12, weight: .medium)).foregroundStyle(t.text).lineLimit(1)
                 Spacer(minLength: 6)
+                if dev.isDisplayAudio {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11)).foregroundStyle(Theme.warning)
+                        .help("Display audio: bam pauses it while displays sleep or change mode.")
+                }
                 if here {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.system(size: 13)).foregroundStyle(t.accent)

@@ -57,6 +57,12 @@ public struct AudioDevice: Sendable, Identifiable, Equatable {
     }
 
     public var outputIcon: String { kind.symbolName }
+
+    /// Carried on the display link, which the display coprocessor tears down on every display power change.
+    public var isDisplayAudio: Bool {
+        transportType == OutputDeviceKind.fourCC("hdmi") || transportType == OutputDeviceKind.fourCC("dprt")
+            || kind == .displaySpeakers || kind == .television
+    }
 }
 
 public enum OutputDeviceKind: Sendable, Equatable {

@@ -29,11 +29,13 @@ public actor MockAudioEngine: AudioEngineProtocol {
         self.silentRouter = silentRouter
     }
 
-    public func outputDevices() -> [AudioDevice] {
-        [AudioDevice(uid: "MockOutput", name: "Built-in Output")]
-    }
+    private var devices = [AudioDevice(uid: "MockOutput", name: "Built-in Output")]
+    public func setOutputDevicesForTests(_ value: [AudioDevice]) { devices = value }
+    public func outputDevices() -> [AudioDevice] { devices }
 
-    public func defaultOutputUID() -> String? { "MockOutput" }
+    private var macDefaultUID: String? = "MockOutput"
+    public func setDefaultOutputUIDForTests(_ uid: String?) { macDefaultUID = uid }
+    public func defaultOutputUID() -> String? { macDefaultUID }
 
     private var resolvedOutputUID: String?
     public func setResolvedOutputUIDForTests(_ uid: String) { resolvedOutputUID = uid }

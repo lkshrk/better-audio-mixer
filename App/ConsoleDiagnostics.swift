@@ -9,6 +9,7 @@ struct ConsoleDiagnostics: Equatable {
     var audioRecoveryState: AudioRecoveryDisplayState
     var boundOutputUID: String?
     var selectedOutputUID: String?
+    var macOutputIsDisplayAudio: Bool
     var outputDeviceCount: Int
     var runningAppCount: Int
     var mixCount: Int
@@ -27,6 +28,7 @@ extension ConsoleViewModel {
             audioRecoveryState: audioRecoveryDisplayState,
             boundOutputUID: await engine.boundOutputUID(),
             selectedOutputUID: systemOutputUID,
+            macOutputIsDisplayAudio: macOutputDisplayWarning != nil,
             outputDeviceCount: outputDevices.count,
             runningAppCount: runningApps.count,
             mixCount: config.mixes.count,
@@ -47,6 +49,7 @@ extension ConsoleViewModel {
             "audioRecoveryState: \(snapshot.audioRecoveryState.reason)",
             "boundOutputUID: \(snapshot.boundOutputUID ?? "none")",
             "selectedOutputUID: \(snapshot.selectedOutputUID ?? "none")",
+            "macOutputIsDisplayAudio: \(snapshot.macOutputIsDisplayAudio)",
             "outputDeviceCount: \(snapshot.outputDeviceCount)",
             "runningAppCount: \(snapshot.runningAppCount)",
             "mixCount: \(snapshot.mixCount)",

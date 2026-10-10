@@ -59,6 +59,22 @@ final class RouterRecoveryGuardTests: XCTestCase {
         XCTAssertEqual(calls.events, ["mute", "teardown", "rebuild", "volume:0.4"])
     }
 
+    func testSilentRebuildStaysMutedWithoutRearmAndReportsAwaitingAudio() async {
+        let calls = RecoveryRecorder()
+        let engine = await engine(calls, status: RouterStatus(cause: .awaitingAudio))
+        let events = await engine.routerRecoveryEvents()
+        await engine.recoverRouterForTests(reason: .aggregateStalled)
+        XCTAssertEqual(calls.events, ["mute", "teardown", "rebuild"], "a silent rebuild must not unmute")
+        let rearming = await engine.rearmPendingForTests()
+        XCTAssertFalse(rearming, "silence is not a failure to retry")
+        var received: [RouterRecoveryEvent] = []
+        for await event in events {
+            received.append(event)
+            if event == .awaitingAudio { break }
+        }
+        XCTAssertEqual(received.last, .awaitingAudio)
+    }
+
     func testPausedRecoveryKeepsProtectionAndRearmUsesOriginalIntent() async {
         let calls = RecoveryRecorder()
         let engine = await engine(calls, status: RouterStatus(cause: .buildFailed))

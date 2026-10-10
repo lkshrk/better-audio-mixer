@@ -122,3 +122,20 @@ private final class StartupCloseRecorder: @unchecked Sendable {
     var events: [String] { lock.withLock { recorded } }
     func append(_ event: String) { lock.withLock { recorded.append(event) } }
 }
+
+final class RouterPendingStartupStatusTests: XCTestCase {
+    func testSilentPendingRouterAwaitsAudioButAudibleOneFailed() {
+        let config = BamConfig(
+            sources: [Source(id: "s0", name: "App", kind: .app, bundleIDs: ["com.x"])],
+            mixes: [Mix(id: "m0", name: "Mix", dest: .virtualSlot(0), sends: [Send(source: "s0")])])
+        let silent = CoreAudioEngine.pendingStartupStatus(config: config, audibleSourceIDs: [])
+        XCTAssertEqual(silent.cause, .awaitingAudio)
+        XCTAssertFalse(silent.isFailure)
+        XCTAssertFalse(silent.releasesOutput)
+        XCTAssertTrue(silent.failedMixIDs.isEmpty)
+
+        let audible = CoreAudioEngine.pendingStartupStatus(config: config, audibleSourceIDs: ["s0"])
+        XCTAssertEqual(audible.cause, .buildFailed)
+        XCTAssertEqual(audible.failedMixIDs, ["m0"])
+    }
+}

@@ -17,6 +17,8 @@ public enum RouterFailureCause: String, Sendable, Equatable {
     /// Not an error: the devices are idle, not broken. Heals when an app starts
     /// (process-list change).
     case noSourcesRunning
+    /// Started, but HAL runs no IO until a tapped process writes; heals when an app plays.
+    case awaitingAudio
     /// Aggregate build failed for some other reason. Retry with backoff.
     case buildFailed
 }
@@ -39,10 +41,13 @@ public struct RouterStatus: Sendable, Equatable {
     /// `noSourcesRunning` are healthy/idle and must NOT show offline.
     public var isFailure: Bool {
         switch cause {
-        case .ok, .noSourcesRunning: return false
+        case .ok, .noSourcesRunning, .awaitingAudio: return false
         case .noOutput, .permissionPending, .buildFailed: return true
         }
     }
+
+    /// Whether a protected start may restore and unmute its output.
+    public var releasesOutput: Bool { !isFailure && cause != .awaitingAudio }
 
     /// Whether a later retry could plausibly succeed without user config changes.
     public var isRecoverable: Bool { cause != .ok }

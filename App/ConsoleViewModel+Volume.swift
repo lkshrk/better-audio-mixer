@@ -80,7 +80,7 @@ extension ConsoleViewModel {
             return outputProtectionFailed()
         }
         let status = await engine.startRouter(config: draft)
-        guard !status.isFailure else { return status }
+        guard status.releasesOutput else { return status }
         guard !routerWorkStale(generation) else { return outputProtectionFailed() }
         var request = restoreRequest(generation: generation)
         request.bound = await engine.boundOutputUID()

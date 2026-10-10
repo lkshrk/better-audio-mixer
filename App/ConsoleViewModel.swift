@@ -36,10 +36,19 @@ final class ConsoleViewModel {
     var error: String?
     /// Sticks for the session, unlike `error`, which the next successful apply clears.
     private(set) var configWarning: String?
+    /// The macOS default output, which bam taps but never changes.
+    private(set) var macOutputUID: String?
+
+    /// bam cannot free the display link while macOS itself renders to it, so this only warns.
+    var macOutputDisplayWarning: String? {
+        guard let uid = macOutputUID, let device = outputDevices.first(where: { $0.uid == uid }),
+              device.isDisplayAudio else { return nil }
+        return "macOS is playing to \(device.name). Display audio has frozen this Mac on display sleep; set the macOS output to another device. bam can still play to the monitor."
+    }
 
     var routerStatusMessage: String? {
         switch routerStatus.cause {
-        case .ok, .noSourcesRunning: return nil
+        case .ok, .noSourcesRunning, .awaitingAudio: return nil
         case .noOutput: return "No output device — connect or select one in the menu bar."
         case .permissionPending: return "Waiting for audio-capture permission. Accept the system prompt to come online."
         case .buildFailed: return "Audio engine couldn't start — retrying automatically."
@@ -89,6 +98,10 @@ final class ConsoleViewModel {
     var routerWorkGeneration = 0
     // Once set, queued router work never runs again: a late startup rebuild must not re-mute after the exit restore.
     private(set) var exiting = false
+    /// Routing is down while the screens sleep because its output is display audio.
+    private(set) var displaySleepSuspended = false
+    private var displayTransitionOpen = false
+    private var screenTransitionTask: Task<Void, Never>?
 
     /// The catch-all device: its `.rest` source routes every unclaimed app to the system default output.
     static let defaultMixID = "mix-default"
@@ -198,6 +211,11 @@ final class ConsoleViewModel {
         await subscribe()
     }
 
+    /// Tests that assert on polled state stop the background poll to avoid racing it.
+    func stopAppPollingForTests() {
+        appsTask?.cancel(); appsTask = nil
+    }
+
     private func subscribe() async {
         if driverEnabled {
             await startRouterSubscriptions(reason: "subscribing router")
@@ -232,7 +250,7 @@ final class ConsoleViewModel {
     }
 
     private func startRouterSubscriptions(reason: StaticString) async {
-        guard !exiting else { return }
+        guard !exiting, !displaySleepSuspended else { return }
         AppLog.router.debug("\(reason, privacy: .public)")
         await enqueueRouterWork { model in await model.startRouterReconciling() }.value
         subscribeRouterEvents()
@@ -302,8 +320,14 @@ final class ConsoleViewModel {
         if apps != runningApps { runningApps = apps }
         let devices = await engine.outputDevices()
         if devices != outputDevices { outputDevices = devices }
+        let macOutput = await engine.defaultOutputUID()
+        if macOutput != macOutputUID { macOutputUID = macOutput }
         let playingNow = await engine.playingBundleIDs()
         if playingNow != playing { playing = playingNow }
+        // Starting playback changes no process or device list, so no router event would promote the waiting router.
+        if !playingNow.isEmpty, routerStatus.cause == .awaitingAudio, driverEnabled, !displaySleepSuspended {
+            await reconcileRouterIfNeeded()
+        }
         await refreshOutputVolume()
     }
 
@@ -346,7 +370,7 @@ final class ConsoleViewModel {
                 )
             }
         }
-        if status.cause == .ok || status.cause == .noSourcesRunning {
+        if !status.isFailure {
             audioRecoveryDisplayState = .ok
         }
         scheduleRouterRecovery(for: status)
@@ -411,10 +435,58 @@ final class ConsoleViewModel {
     }
 
     func systemDidWake() {
-        guard driverEnabled else { return }
+        guard driverEnabled, !displaySleepSuspended else { return }
         AppLog.router.debug("system woke; reconciling")
         Task { await reconcileRouterIfNeeded() }
     }
+
+    /// Display audio endpoints vanish and return across display power changes; keeping IO on them then has panicked the display coprocessor.
+    func displayTransitionBegan() async {
+        displayTransitionOpen = true
+        await enqueueScreenTransition { model in await model.suspendForDisplaySleep() }
+    }
+
+    func displayTransitionEnded() async {
+        displayTransitionOpen = false
+        await enqueueScreenTransition { model in await model.resumeAfterDisplaySleep() }
+    }
+
+    /// Begin and end each await HAL; serializing them keeps a quick wake from interleaving with the stop.
+    private func enqueueScreenTransition(_ work: @escaping @MainActor (ConsoleViewModel) async -> Void) async {
+        let previous = screenTransitionTask
+        let task = Task { [weak self] in
+            await previous?.value
+            guard let self else { return }
+            await work(self)
+        }
+        screenTransitionTask = task
+        await task.value
+    }
+
+    private func suspendForDisplaySleep() async {
+        guard displayTransitionOpen, driverEnabled, !displaySleepSuspended, !exiting else { return }
+        guard let bound = await engine.boundOutputUID() else { return }
+        // Cached list first: a HAL read here loses time against the firmware power-down.
+        var device = outputDevices.first { $0.uid == bound }
+        if device == nil { device = await engine.outputDevices().first { $0.uid == bound } }
+        guard device?.isDisplayAudio == true, displayTransitionOpen else { return }
+        AppLog.router.notice("display transition with display audio output; suspending routing")
+        displaySleepSuspended = true
+        stopRouterSubscriptions()
+        await drainRouterWork()
+        if !(await stopRouterGuarded()) {
+            AppLog.router.error("display transition: router stop failed")
+        }
+    }
+
+    private func resumeAfterDisplaySleep() async {
+        guard !displayTransitionOpen, displaySleepSuspended else { return }
+        displaySleepSuspended = false
+        guard driverEnabled, !exiting else { return }
+        AppLog.router.notice("display transition ended; resuming routing")
+        await startRouterSubscriptions(reason: "display transition ended; restarting router")
+    }
+
 
     private func subscribeRouterRecoveryEvents() {
         routerRecoveryEventTask?.cancel()
@@ -444,6 +516,9 @@ final class ConsoleViewModel {
         case .recovered:
             AppLog.router.debug("recovery cleared")
             audioRecoveryDisplayState = .ok
+        case .awaitingAudio:
+            AppLog.router.debug("recovery rebuilt; awaiting audio")
+            applyRouterStatus(RouterStatus(cause: .awaitingAudio))
         }
     }
 
@@ -608,7 +683,8 @@ final class ConsoleViewModel {
         let generation = routerWorkGeneration
         let task = Task { [weak self] in
             await previous?.value
-            guard let self, !self.exiting, (!requiresDriver || self.driverEnabled), !Task.isCancelled,
+            guard let self, !self.exiting,
+                  (!requiresDriver || (self.driverEnabled && !self.displaySleepSuspended)), !Task.isCancelled,
                   self.routerWorkGeneration == generation else { return }
             await work(self)
         }

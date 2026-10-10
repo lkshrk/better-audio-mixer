@@ -67,6 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         buildStatusItem()
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(systemDidWake), name: NSWorkspace.didWakeNotification, object: nil)
+        observeDisplayTransitions()
         started = true
         Task { await model.start() }
     }
@@ -88,6 +89,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func systemDidWake(_ note: Notification) {
         model.systemDidWake()
+    }
+
+    private lazy var displayGate = DisplayTransitionGate(
+        onBegin: { [weak self] in Task { await self?.model.displayTransitionBegan() } },
+        onEnd: { [weak self] in Task { await self?.model.displayTransitionEnded() } })
+
+    private func observeDisplayTransitions() {
+        let workspace = NSWorkspace.shared.notificationCenter
+        let pairs: [(Notification.Name, DisplayTransitionGate.Reason, Bool)] = [
+            (NSWorkspace.screensDidSleepNotification, .screensAsleep, true),
+            (NSWorkspace.screensDidWakeNotification, .screensAsleep, false),
+            (NSWorkspace.willSleepNotification, .systemAsleep, true),
+            (NSWorkspace.didWakeNotification, .systemAsleep, false),
+        ]
+        for (name, reason, begins) in pairs {
+            workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.displayTransition(reason, begins: begins) }
+            }
+        }
+        let distributed = DistributedNotificationCenter.default()
+        for (name, begins) in [("com.apple.screenIsLocked", true), ("com.apple.screenIsUnlocked", false)] {
+            distributed.addObserver(forName: .init(name), object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.displayTransition(.locked, begins: begins) }
+            }
+        }
+        // Fires before a mode, rotation or hotplug change lands, ahead of the firmware power-down.
+        CGDisplayRegisterReconfigurationCallback({ _, flags, info in
+            guard let info else { return }
+            let delegate = Unmanaged<AppDelegate>.fromOpaque(info).takeUnretainedValue()
+            let begins = flags.contains(.beginConfigurationFlag)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { delegate.displayTransition(.reconfiguring, begins: begins) }
+            }
+        }, Unmanaged.passUnretained(self).toOpaque())
+    }
+
+    private func displayTransition(_ reason: DisplayTransitionGate.Reason, begins: Bool) {
+        if begins { displayGate.begin(reason) } else { displayGate.end(reason) }
     }
 
     // MARK: - Window

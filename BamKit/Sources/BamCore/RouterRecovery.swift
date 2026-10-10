@@ -4,6 +4,8 @@ public enum RouterRecoveryEvent: Sendable, Equatable {
     case attempting(reason: String, attempt: Int)
     case paused(reason: String, attempts: Int, window: TimeInterval, cooldown: TimeInterval)
     case recovered
+    /// Rebuilt but silent: the output stays protected until an app plays.
+    case awaitingAudio
 }
 
 public enum RecoveryReason: String, Sendable, Equatable, CaseIterable {

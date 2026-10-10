@@ -153,6 +153,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         router = RouterAggregate(taps: [], resources: resources)
     }
     func hasRouterForTests() -> Bool { router != nil }
+    func rearmPendingForTests() -> Bool { !rearmTasks.isEmpty }
     func routerAggregateIDForTests() -> AudioObjectID? { router?.aggregateID }
     func checkRouterHealthForTests() async -> Bool {
         guard let signature = routerTapSig else { return false }
@@ -1064,8 +1065,7 @@ public actor CoreAudioEngine: AudioEngineProtocol {
             // Same taps and output: refold gains only; a pending aggregate just re-checks readiness.
             applyRouterGains(config, to: live)
             if pendingRouterTapSig != nil {
-                let promoted = await checkPendingRouterReadiness()
-                return promoted ? .ok : .offline(config, .buildFailed)
+                return await pendingStartupStatus(config: config, promoted: await checkPendingRouterReadiness())
             }
             publishMeters()
             return .ok
@@ -1122,8 +1122,22 @@ public actor CoreAudioEngine: AudioEngineProtocol {
                 ))
             })
         )
-        let promoted = await checkPendingRouterReadiness()
-        return promoted ? .ok : .offline(config, .buildFailed)
+        return await pendingStartupStatus(config: config, promoted: await checkPendingRouterReadiness())
+    }
+
+    private func pendingStartupStatus(config: BamConfig, promoted: Bool) async -> RouterStatus {
+        if promoted { return .ok }
+        guard router != nil, pendingRouterTapSig != nil else { return .offline(config, .buildFailed) }
+        let readProcesses = polling.processes
+        let processes = await Task.detached(priority: .utility) { readProcesses() }.value
+        let audible = Self.expectedAudibleSourceIDs(config: config, processes: processes,
+                                                    selfBundle: Bundle.main.bundleIdentifier)
+        return Self.pendingStartupStatus(config: config, audibleSourceIDs: audible)
+    }
+
+    /// HAL starts no IO on a tap aggregate until some tapped process writes, so silence is not a failed start.
+    nonisolated static func pendingStartupStatus(config: BamConfig, audibleSourceIDs: Set<String>) -> RouterStatus {
+        audibleSourceIDs.isEmpty ? RouterStatus(cause: .awaitingAudio) : .offline(config, .buildFailed)
     }
 
     /// Track the actual renderer even while the caller keeps it hardware-muted.
@@ -1403,25 +1417,35 @@ public actor CoreAudioEngine: AudioEngineProtocol {
         emitRouterRecoveryEvent(event)
         routerHealthTask?.cancel()
         routerHealthTask = nil
+        var awaitingAudio = false
         let restored = await performGuardedOutputRebuild(uids: resolvedRouterOutputUIDs(config: config), unmute: !config.masterMuted) {
+            let rebuilt: RouterStatus
             if allowOffline, pendingRouterTapSig != nil {
                 guard case .attempting = event else { return false }
-                if let hooks = recoveryTestHooks { return !hooks.rebuild().isFailure }
-                return !(await startRouterLocked(config: config)).isFailure
+                rebuilt = await recoveryRebuild(config: config)
+            } else {
+                routerGeneration += 1
+                recoveryTestHooks?.willTearDown()
+                guard await closeRouter() else { return false }
+                for sourceID in resetSourceIDs { liveTaps[sourceID] = nil }
+                routerHealthBaseline = nil
+                guard case .attempting = event else { return false }
+                bamLog("router recovery: \(reason.rawValue)")
+                rebuilt = await recoveryRebuild(config: config)
             }
-            routerGeneration += 1
-            recoveryTestHooks?.willTearDown()
-            guard await closeRouter() else { return false }
-            for sourceID in resetSourceIDs { liveTaps[sourceID] = nil }
-            routerHealthBaseline = nil
-            guard case .attempting = event else { return false }
-            bamLog("router recovery: \(reason.rawValue)")
-            if let hooks = recoveryTestHooks { return !hooks.rebuild().isFailure }
-            return !(await startRouterLocked(config: config)).isFailure
+            awaitingAudio = rebuilt.cause == .awaitingAudio
+            return rebuilt.releasesOutput
         }
-        if !restored {
+        // A silent pending router stays muted; the next startRouter after playback begins promotes it.
+        if awaitingAudio { emitRouterRecoveryEvent(.awaitingAudio) }
+        if !restored, !awaitingAudio {
             scheduleRecoveryRearm(reason: reason, signature: routerTapSig ?? signature, resetSourceIDs: resetSourceIDs)
         }
+    }
+
+    private func recoveryRebuild(config: BamConfig) async -> RouterStatus {
+        if let hooks = recoveryTestHooks { return hooks.rebuild() }
+        return await startRouterLocked(config: config)
     }
 
     private func scheduleRecoveryRearm(reason: RecoveryReason, signature: String, resetSourceIDs: Set<String>) {

@@ -46,4 +46,15 @@ struct OutputDeviceKindTests {
         let device = AudioDevice(uid: "u", name: "HyperX Cloud II", transportType: OutputDeviceKind.fourCC("usb "))
         #expect(device.outputIcon == "headphones")
     }
+
+    @Test func displayAudioFollowsTransportEvenWithSpeakerName() {
+        func device(_ name: String, _ transport: String) -> AudioDevice {
+            AudioDevice(uid: name, name: name, transportType: OutputDeviceKind.fourCC(transport))
+        }
+        #expect(device("Odyssey G60SD", "dprt").isDisplayAudio)
+        #expect(device("Edifier Speakers", "dprt").isDisplayAudio)
+        #expect(device("Sony TV", "hdmi").isDisplayAudio)
+        #expect(!device("Razer BlackShark V2 Pro 2.4", "usb ").isDisplayAudio)
+        #expect(!device("SoundDesk Virtual Cable", "virt").isDisplayAudio)
+    }
 }

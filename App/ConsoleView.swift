@@ -23,6 +23,9 @@ struct ConsoleView: View {
                 if let warning = model.configWarning {
                     banner(warning, tint: Theme.warning)
                 }
+                if let warning = model.macOutputDisplayWarning {
+                    banner(warning, tint: Theme.warning)
+                }
                 if let err = model.error {
                     banner(err, tint: .red)
                 }

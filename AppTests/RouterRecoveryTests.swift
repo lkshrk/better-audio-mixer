@@ -480,4 +480,119 @@ final class RouterRecoveryTests: XCTestCase {
         let laterCalls = await mock.calls
         XCTAssertTrue(laterCalls.isEmpty, "cancelled queued work must not resume after teardown")
     }
+
+    func testAwaitingAudioKeepsOutputMutedWithoutHeartbeatAndRecoversWhenAppPlays() async {
+        let mock = MockAudioEngine()
+        await mock.scriptRouterStatuses([RouterStatus(cause: .awaitingAudio), .ok])
+        let model = ConsoleViewModel(engine: mock, defaults: defaults)
+        var heartbeats = 0
+        model.recoverySleep = { _ in heartbeats += 1 }
+        await model.startMock(config: config())
+
+        XCTAssertEqual(model.routerStatus.cause, .awaitingAudio)
+        XCTAssertFalse(model.routerStatus.isFailure)
+        XCTAssertTrue(model.failedMixIDs.isEmpty)
+        XCTAssertNil(model.routerStatusMessage)
+        let calls = await mock.calls
+        XCTAssertTrue(calls.contains(.setOutputMuted(uid: "MockOutput", muted: true)))
+        XCTAssertFalse(calls.contains(.setOutputMuted(uid: "MockOutput", muted: false)),
+                       "output stays guarded until the router renders")
+        try? await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(heartbeats, 0, "silence is not a failure and must not poll")
+
+        await model.refreshAppState()
+        let healed = await eventually { model.routerStatus.cause == .ok }
+        XCTAssertTrue(healed, "an app starting playback must re-check the waiting router")
+        let unmuted = await mock.calls.contains(.setOutputMuted(uid: "MockOutput", muted: false))
+        XCTAssertTrue(unmuted)
+        await model.stop()
+    }
+
+    func testScreenSleepSuspendsRoutingOnlyForDisplayAudio() async {
+        let mock = MockAudioEngine()
+        let model = ConsoleViewModel(engine: mock, defaults: defaults)
+        await model.startMock(config: config())
+
+        await model.displayTransitionBegan()
+        XCTAssertFalse(model.displaySleepSuspended, "non-display output keeps routing")
+        let kept = await mock.lastRouterConfig
+        XCTAssertNotNil(kept)
+
+        await mock.setOutputDevicesForTests([AudioDevice(uid: "MockOutput", name: "Odyssey G60SD",
+                                                         transportType: 0x6470_7274)])
+        await model.refreshAppState()
+        await model.displayTransitionBegan()
+        XCTAssertTrue(model.displaySleepSuspended)
+        let stopped = await mock.lastRouterConfig
+        XCTAssertNil(stopped)
+
+        let callsWhileAsleep = await mock.startRouterCalls
+        await mock.emitRouterEvent()
+        model.systemDidWake()
+        await model.refreshAppState()
+        try? await Task.sleep(for: .milliseconds(100))
+        let callsAfterEvents = await mock.startRouterCalls
+        XCTAssertEqual(callsAfterEvents, callsWhileAsleep, "nothing may rebuild on display audio while screens sleep")
+
+        await model.displayTransitionEnded()
+        XCTAssertFalse(model.displaySleepSuspended)
+        let resumed = await eventuallyAsync { await mock.lastRouterConfig != nil }
+        XCTAssertTrue(resumed)
+        await model.stop()
+    }
+
+    func testQuickScreenWakeDuringSleepSuspendResumesRouting() async {
+        let mock = MockAudioEngine()
+        await mock.setOutputDevicesForTests([AudioDevice(uid: "MockOutput", name: "Odyssey G60SD",
+                                                         transportType: 0x6470_7274)])
+        let model = ConsoleViewModel(engine: mock, defaults: defaults)
+        await model.startMock(config: config())
+
+        async let sleep: Void = model.displayTransitionBegan()
+        async let wake: Void = model.displayTransitionEnded()
+        _ = await (sleep, wake)
+
+        XCTAssertFalse(model.displaySleepSuspended, "a wake that arrives mid-suspend must not strand routing")
+        let running = await eventuallyAsync { await mock.lastRouterConfig != nil }
+        XCTAssertTrue(running)
+        await model.stop()
+    }
+
+    func testEngineAwaitingAudioEventRetriesWhenAppPlays() async {
+        let mock = MockAudioEngine()
+        let model = ConsoleViewModel(engine: mock, defaults: defaults)
+        await model.startMock(config: config())
+        let before = await mock.startRouterCalls
+        await mock.emitRouterRecoveryEvent(.awaitingAudio)
+        let retried = await eventuallyAsync(3) { await mock.startRouterCalls > before }
+        XCTAssertTrue(retried, "a playing app must promote a router the engine left waiting")
+        let settled = await eventually { model.routerStatus.cause == .ok }
+        XCTAssertTrue(settled)
+        await model.stop()
+    }
+
+    func testMacOutputOnDisplayAudioWarnsWithoutTouchingIt() async {
+        let mock = MockAudioEngine()
+        let model = ConsoleViewModel(engine: mock, defaults: defaults)
+        await model.startMock(config: config())
+        await model.refreshAppState()
+        XCTAssertNil(model.macOutputDisplayWarning)
+
+        await mock.setOutputDevicesForTests([
+            AudioDevice(uid: "MockOutput", name: "Built-in Output"),
+            AudioDevice(uid: "dp", name: "Odyssey G60SD", transportType: 0x6470_7274),
+        ])
+        await mock.setDefaultOutputUIDForTests("dp")
+        await model.refreshAppState()
+        XCTAssertEqual(model.macOutputDisplayWarning?.contains("Odyssey G60SD"), true)
+        let report = await model.diagnosticsReport()
+        XCTAssertTrue(report.contains("macOutputIsDisplayAudio: true"))
+        let defaultNow = await mock.defaultOutputUID()
+        XCTAssertEqual(defaultNow, "dp", "bam must never change the macOS output")
+
+        await mock.setDefaultOutputUIDForTests("MockOutput")
+        await model.refreshAppState()
+        XCTAssertNil(model.macOutputDisplayWarning)
+        await model.stop()
+    }
 }

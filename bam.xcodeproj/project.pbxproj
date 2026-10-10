@@ -19,8 +19,10 @@
 		68E75D40B3995E1827DDF1A2 /* Log.swift in Sources */ = {isa = PBXBuildFile; fileRef = D775C14357F80E055B095736 /* Log.swift */; };
 		6DDD1201C3BDFE98417BDDC4 /* RouterStartupIntentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A1972EA59BDD1066151F2FB /* RouterStartupIntentTests.swift */; };
 		6FA829FF582BFF6EEAA6B893 /* BamControlKit in Frameworks */ = {isa = PBXBuildFile; productRef = 9E58070D92F985C1FCD0B5C9 /* BamControlKit */; };
+		78A0B627C65907AA1746A4B8 /* DisplayTransitionGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A041FF96747919ADD17FE5F /* DisplayTransitionGate.swift */; };
 		7B61C45064A107B28B4A6CB7 /* ConsoleViewModel+Volume.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6E8A251E92BA04BC821A812 /* ConsoleViewModel+Volume.swift */; };
 		8C48A55690421E4B23FE3EC5 /* ChannelStrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56565B7281A1EBD3533F2E5B /* ChannelStrip.swift */; };
+		9177F72CE2CB7752BD5A45D5 /* DisplayTransitionGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C0485911554B71490F1ADD4 /* DisplayTransitionGateTests.swift */; };
 		9EC89CCDE55A5DE2E4ECF343 /* RouterSafetyConcurrencyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25759BF0446B8721EC73F01D /* RouterSafetyConcurrencyTests.swift */; };
 		A85A072B5C728656F7D30061 /* ConsoleDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9AD661A8BD0635A24BC6074 /* ConsoleDiagnostics.swift */; };
 		AF1ACB6FF224BC0D3F328D1E /* AudioRecoveryDisplayState.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD27CF0F8C598478D6CFFC1F /* AudioRecoveryDisplayState.swift */; };
@@ -52,10 +54,12 @@
 		01A7698D14234DCD0FA72CBA /* PeakHold.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeakHold.swift; sourceTree = "<group>"; };
 		0425A295A3528927CF29587D /* bam.yaml */ = {isa = PBXFileReference; lastKnownFileType = text.yaml; path = bam.yaml; sourceTree = "<group>"; };
 		19EAE6316D97A824FA6AB00C /* bamTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = bamTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		1A041FF96747919ADD17FE5F /* DisplayTransitionGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayTransitionGate.swift; sourceTree = "<group>"; };
 		25759BF0446B8721EC73F01D /* RouterSafetyConcurrencyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouterSafetyConcurrencyTests.swift; sourceTree = "<group>"; };
 		2A1972EA59BDD1066151F2FB /* RouterStartupIntentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouterStartupIntentTests.swift; sourceTree = "<group>"; };
 		3682354B40DAFEB00830820E /* ConsoleViewModel+MixerControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ConsoleViewModel+MixerControl.swift"; sourceTree = "<group>"; };
 		385C8A345BD5D8824F5156BC /* ConsoleSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConsoleSnapshotTests.swift; sourceTree = "<group>"; };
+		3C0485911554B71490F1ADD4 /* DisplayTransitionGateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayTransitionGateTests.swift; sourceTree = "<group>"; };
 		4DD2D055563B514321429B1D /* ConsoleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConsoleView.swift; sourceTree = "<group>"; };
 		56565B7281A1EBD3533F2E5B /* ChannelStrip.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChannelStrip.swift; sourceTree = "<group>"; };
 		6C9AE8C107194442B4273A6B /* PeakHoldTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeakHoldTests.swift; sourceTree = "<group>"; };
@@ -118,6 +122,7 @@
 				385C8A345BD5D8824F5156BC /* ConsoleSnapshotTests.swift */,
 				EB91DD30866DEFA8DE2998A1 /* ConsoleViewModelLifecycleTests.swift */,
 				F10AB49B15328BE7A0FDFF21 /* ConsoleViewModelUseCaseTests.swift */,
+				3C0485911554B71490F1ADD4 /* DisplayTransitionGateTests.swift */,
 				E4E22AE825568C0A54104344 /* LiveExitPathTests.swift */,
 				6C9AE8C107194442B4273A6B /* PeakHoldTests.swift */,
 				F6CF52141C9E399BB8CAADB5 /* RouterRecoveryTests.swift */,
@@ -142,6 +147,7 @@
 				3682354B40DAFEB00830820E /* ConsoleViewModel+MixerControl.swift */,
 				8A6E858B1BA9B3C6D08EF60E /* ConsoleViewModel+Routing.swift */,
 				B6E8A251E92BA04BC821A812 /* ConsoleViewModel+Volume.swift */,
+				1A041FF96747919ADD17FE5F /* DisplayTransitionGate.swift */,
 				C45ED77F92E7C31505AAAB9A /* Info.plist */,
 				D775C14357F80E055B095736 /* Log.swift */,
 				8A549902DE0CFF1C9E16FEF0 /* OutputProtection.swift */,
@@ -280,6 +286,7 @@
 				D2E1BF0775317098AB298353 /* ConsoleViewModel+Routing.swift in Sources */,
 				7B61C45064A107B28B4A6CB7 /* ConsoleViewModel+Volume.swift in Sources */,
 				22854C12B20885A8D5631E36 /* ConsoleViewModel.swift in Sources */,
+				78A0B627C65907AA1746A4B8 /* DisplayTransitionGate.swift in Sources */,
 				68E75D40B3995E1827DDF1A2 /* Log.swift in Sources */,
 				BDDD75BE91118B3DBC8C9CFF /* OutputProtection.swift in Sources */,
 				F017138E415371FC5733427B /* PeakHold.swift in Sources */,
@@ -293,6 +300,7 @@
 				3BF17072ED7611E33DF19E0C /* ConsoleSnapshotTests.swift in Sources */,
 				53CD78153466CDE351D86771 /* ConsoleViewModelLifecycleTests.swift in Sources */,
 				E76E0E6166086845C988A34D /* ConsoleViewModelUseCaseTests.swift in Sources */,
+				9177F72CE2CB7752BD5A45D5 /* DisplayTransitionGateTests.swift in Sources */,
 				DEA1460E2219F276AFF3131D /* LiveExitPathTests.swift in Sources */,
 				1032121E6FF82B2280749426 /* PeakHoldTests.swift in Sources */,
 				5ACCD643C76B8FFDDD6CE8FF /* RouterRecoveryTests.swift in Sources */,
