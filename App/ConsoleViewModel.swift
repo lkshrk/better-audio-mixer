@@ -212,8 +212,11 @@ final class ConsoleViewModel {
     }
 
     /// Tests that assert on polled state stop the background poll to avoid racing it.
-    func stopAppPollingForTests() {
-        appsTask?.cancel(); appsTask = nil
+    func stopAppPollingForTests() async {
+        let task = appsTask
+        appsTask = nil
+        task?.cancel()
+        await task?.value
     }
 
     private func subscribe() async {
