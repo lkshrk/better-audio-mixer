@@ -548,9 +548,27 @@ final class RouterRecoveryTests: XCTestCase {
         let model = ConsoleViewModel(engine: mock, defaults: defaults)
         await model.startMock(config: config())
 
-        async let sleep: Void = model.displayTransitionBegan()
-        async let wake: Void = model.displayTransitionEnded()
-        _ = await (sleep, wake)
+        let suspendEntered = expectation(description: "display sleep is restoring the output")
+        let wakeRequested = expectation(description: "wake arrives before suspension finishes")
+        let releaseSuspend = AsyncStream<Void>.makeStream()
+        await mock.setOutputVolumeRestoreHookForTests { @MainActor in
+            suspendEntered.fulfill()
+            for await _ in releaseSuspend.stream { break }
+        }
+
+        // async-let children can start in either order. Hold the actual suspend
+        // at an engine await so this test always requests wake in the middle.
+        let sleep = Task { await model.displayTransitionBegan() }
+        await fulfillment(of: [suspendEntered], timeout: 1)
+        XCTAssertTrue(model.displaySleepSuspended)
+        let wake = Task {
+            wakeRequested.fulfill()
+            await model.displayTransitionEnded()
+        }
+        await fulfillment(of: [wakeRequested], timeout: 1)
+        releaseSuspend.continuation.finish()
+        await sleep.value
+        await wake.value
 
         XCTAssertFalse(model.displaySleepSuspended, "a wake that arrives mid-suspend must not strand routing")
         let running = await eventuallyAsync { await mock.lastRouterConfig != nil }
