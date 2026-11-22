@@ -102,6 +102,9 @@ jobs:
     needs: gate
     if: needs.gate.outputs.tag != ''
     runs-on: macos-26
+    permissions:
+      contents: write
+      id-token: write
     env:
       DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
       SIGNING_IDENTITY: ${{ secrets.SIGNING_IDENTITY }}
@@ -280,9 +283,17 @@ jobs:
             --generate-notes \
             --notes "sha256: \`${{ steps.pkg.outputs.sha256 }}\`"
 
+      - name: Create homebrew-tap-publish token
+        id: tap-token
+        uses: octo-sts/action@f603d3be9d8dd9871a265776e625a27b00effe05 # v1.1.1
+        with:
+          domain: sts.h-cloud.io
+          scope: lkshrk
+          identity: homebrew-tap-publish
+
       - name: Bump Homebrew tap
         env:
-          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+          TAP_TOKEN: ${{ steps.tap-token.outputs.token }}
         run: |
           VERSION="${TAG#v}"
           SHA="${{ steps.pkg.outputs.sha256 }}"
